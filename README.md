@@ -69,7 +69,7 @@ Keep the token and the ADC file out of any repository.
 ## Install
 
 ```bash
-pipx install "git+https://github.com/Luxand/google-ads-write-mcp@v0.5.1"
+pipx install "git+https://github.com/Luxand/google-ads-write-mcp@v0.5.2"
 google-ads-write-mcp --check        # shows which credential files it found; no secrets printed
 google-ads-write-mcp --list-tools
 ```

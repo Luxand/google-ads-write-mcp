@@ -662,7 +662,7 @@ def create_search_campaign(
     The campaign gets the managed label (default "claude-managed"; created in the account on first
     use) so remove_entity can later act on it. It is created PAUSED; enable it with set_status.
     locations: geo target constant ids (United States = 2840). languages: language constant ids
-    (English = 1000). bidding: MAXIMIZE_CONVERSIONS (optional target_cpa) or MAXIMIZE_CLICKS.
+    (English = 1000); an empty list means "all languages" (no language criterion is created). bidding: MAXIMIZE_CONVERSIONS (optional target_cpa) or MAXIMIZE_CLICKS.
     Network: Google Search only (no partners, no Display).
     ad_groups: [{"name", "final_url", "keywords": [{"text","match_type"}], "headlines": [...],
                  "descriptions": [...], "path1", "path2", "status", "final_url_suffix",
@@ -683,8 +683,9 @@ def create_search_campaign(
         return _fail(tool, cid, payload, "campaign name is empty")
     if not (0 < daily_budget < 100_000):
         return _fail(tool, cid, payload, "daily_budget out of range")
-    if not locations or not languages:
-        return _fail(tool, cid, payload, "locations and languages are both required")
+    if not locations:
+        return _fail(tool, cid, payload, "locations are required")
+    languages = languages or []          # empty = all languages (no language criterion)
     if not ad_groups:
         return _fail(tool, cid, payload, "at least one ad group is required")
     if bidding not in ("MAXIMIZE_CONVERSIONS", "MAXIMIZE_CLICKS"):
