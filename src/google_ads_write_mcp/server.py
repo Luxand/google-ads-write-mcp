@@ -402,7 +402,7 @@ def add_sitelinks(customer_id: str, campaign_id: str, sitelinks: List[Dict[str, 
             asset.final_urls.append(s["final_url"])
         return fill
 
-    ops = _campaign_asset_ops(c, cid, campaign_id, [mk(s) for s in sitelinks], "SITELINK")
+    ops = _campaign_asset_ops(c, cid, campaign_id, [mk(s) for s in sitelinks], "SITELINK", ad_group_id)
     return _run_mutate(tool, cid, ops, confirm, payload)
 
 
@@ -928,8 +928,9 @@ def add_image_assets(
 # --------------------------------------------------------------------------- removal (guarded)
 @mcp.tool()
 def remove_entity(customer_id: str, resource_name: Union[str, List[str]], confirm: bool = False) -> Dict[str, Any]:
-    """PERMANENTLY remove a campaign, ad group, ad (adGroupAds/...), keyword (adGroupCriteria/...) or
-    campaign criterion such as a campaign negative keyword (campaignCriteria/...).
+    """PERMANENTLY remove a campaign, ad group, ad (adGroupAds/...), keyword (adGroupCriteria/...),
+    campaign criterion such as a campaign negative keyword (campaignCriteria/...), or an asset LINK
+    (campaignAssets/..., adGroupAssets/... - the asset itself stays in the account's asset library).
 
     resource_name may be one resource name or a list of names of the SAME kind; a list is removed
     in one atomic mutate. Refuses unless every entity sits under a campaign carrying the managed
@@ -949,11 +950,13 @@ def remove_entity(customer_id: str, resource_name: Union[str, List[str]], confir
         "/adGroupAds/": ("ad_group_ad", "ad_group_ad", "ad_group_ad.resource_name"),
         "/adGroupCriteria/": ("ad_group_criterion", "ad_group_criterion", "ad_group_criterion.resource_name"),
         "/campaignCriteria/": ("campaign_criterion", "campaign_criterion", "campaign_criterion.resource_name"),
+        "/campaignAssets/": ("campaign_asset", "campaign_asset", "campaign_asset.resource_name"),
+        "/adGroupAssets/": ("ad_group_asset", "ad_group_asset", "ad_group_asset.resource_name"),
     }
     matched = {k for n in names for k in kinds if k in n}
     if len(matched) != 1:
         return _fail(tool, cid, payload, "all resource names must be of one supported kind: campaigns/, adGroups/, "
-                                         "adGroupAds/, adGroupCriteria/ or campaignCriteria/")
+                                         "adGroupAds/, adGroupCriteria/, campaignCriteria/, campaignAssets/ or adGroupAssets/")
     kind, resource, rn_field = kinds[matched.pop()]
     c = _get_client()
     ga = c.get_service("GoogleAdsService")
