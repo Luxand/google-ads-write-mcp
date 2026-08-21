@@ -979,8 +979,8 @@ def remove_entity(customer_id: str, resource_name: Union[str, List[str]], confir
 
 
 # --------------------------------------------------------------------------- device bid modifiers
-# Google's fixed criterion ids for device criteria.
-_DEVICE_IDS = {"MOBILE": 30000, "TABLET": 30001, "DESKTOP": 30002}
+# Google's fixed criterion ids for device criteria (campaignCriteria/<campaign>~<id>).
+_DEVICE_IDS = {"DESKTOP": 30000, "MOBILE": 30001, "TABLET": 30002}
 
 
 def _device_ops(c: GoogleAdsClient, cid: str, campaign_rn: str, existing: Dict[str, str],
