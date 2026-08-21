@@ -644,7 +644,6 @@ def create_search_campaign(
     bidding: str = "MAXIMIZE_CONVERSIONS",
     target_cpa: Optional[float] = None,
     negative_keywords: Optional[List[Dict[str, str]]] = None,
-    device_bid_modifiers: Optional[Dict[str, float]] = None,
     confirm: bool = False,
 ) -> Dict[str, Any]:
     """Create a complete Search campaign in ONE atomic mutate: budget, campaign, location and
@@ -659,14 +658,14 @@ def create_search_campaign(
                  "descriptions": [...], "path1", "path2", "status", "final_url_suffix",
                  "negative_keywords": [...]}, ...]
     negative_keywords: [{"text", "match_type"}] at campaign level.
-    device_bid_modifiers: {"DESKTOP": -100, "TABLET": -100} percent adjustments (-100 excludes a device;
-    mobile-only = desktop and tablet at -100).
+    Device bid adjustments (e.g. mobile-only) are a follow-up call to set_device_bid_modifiers with the
+    returned campaign id: the device criteria only exist once the campaign does.
     Extensions (sitelinks, callouts, snippets, images) are separate tools - call them with the
     returned campaign id. Dry run unless confirm=true.
     """
     cid = _cid(customer_id)
     payload = dict(name=name, daily_budget=daily_budget, locations=locations, languages=languages,
-                   bidding=bidding, target_cpa=target_cpa, device_bid_modifiers=device_bid_modifiers,
+                   bidding=bidding, target_cpa=target_cpa,
                    ad_groups=[{"name": g.get("name"), "keywords": len(g.get("keywords") or [])} for g in ad_groups],
                    negative_keywords=len(negative_keywords or []))
     tool = "create_search_campaign"
@@ -756,11 +755,6 @@ def create_search_campaign(
         cc.campaign = campaign_rn
         cc.language.language_constant = f"languageConstants/{int(lang)}"
         ops.append(op)
-    if device_bid_modifiers:
-        try:
-            ops.extend(_device_ops(c, cid, campaign_rn, {}, {k.upper(): v for k, v in device_bid_modifiers.items()}))
-        except ValueError as exc:
-            return _fail(tool, cid, payload, str(exc))
     for kw in negative_keywords or []:
         mt = (kw.get("match_type") or "PHRASE").upper()
         if mt not in ("EXACT", "PHRASE", "BROAD"):
@@ -1048,10 +1042,12 @@ def set_final_urls(customer_id: str, targets: List[Dict[str, Any]], confirm: boo
 _DEVICE_IDS = {"DESKTOP": 30000, "MOBILE": 30001, "TABLET": 30002}
 
 
-def _device_ops(c: GoogleAdsClient, cid: str, campaign_rn: str, existing: Dict[str, str],
-                modifiers: Dict[str, float]):
-    """modifiers: {"DESKTOP": -100, "TABLET": -100, "MOBILE": 0} as percent adjustments.
-    -100 excludes the device. Creates missing device criteria, updates existing ones."""
+def _device_ops(c: GoogleAdsClient, cid: str, campaign_id: str, modifiers: Dict[str, Optional[float]]):
+    """modifiers: {"DESKTOP": -100, "TABLET": -100, "MOBILE": None} as percent adjustments.
+    Device criteria always exist implicitly, so this is always an UPDATE by the fixed resource
+    name campaignCriteria/<campaign>~<device id>. The update mask names bid_modifier explicitly:
+    protobuf field masks built by comparison drop fields at their default, and 0.0 (-100%) is
+    the default for a double - the silent no-op that bit the first live attempt."""
     ops = []
     for dev, pct in modifiers.items():
         if pct is None:
@@ -1060,18 +1056,11 @@ def _device_ops(c: GoogleAdsClient, cid: str, campaign_rn: str, existing: Dict[s
             raise ValueError(f"unknown device {dev!r}; use DESKTOP, TABLET, MOBILE")
         if not (-100 <= pct <= 900):
             raise ValueError(f"{dev}: adjustment must be between -100 and +900 percent")
-        modifier = round(1 + pct / 100.0, 2)
         op = c.get_type("MutateOperation")
-        if dev in existing:
-            crit = op.campaign_criterion_operation.update
-            crit.resource_name = existing[dev]
-            crit.bid_modifier = modifier
-            op.campaign_criterion_operation.update_mask.CopyFrom(protobuf_helpers.field_mask(None, crit._pb))
-        else:
-            crit = op.campaign_criterion_operation.create
-            crit.campaign = campaign_rn
-            crit.device.type_ = getattr(c.enums.DeviceEnum, dev)
-            crit.bid_modifier = modifier
+        crit = op.campaign_criterion_operation.update
+        crit.resource_name = f"customers/{cid}/campaignCriteria/{int(campaign_id)}~{_DEVICE_IDS[dev]}"
+        crit.bid_modifier = round(1 + pct / 100.0, 2)
+        op.campaign_criterion_operation.update_mask.paths.append("bid_modifier")
         ops.append(op)
     return ops
 
@@ -1096,14 +1085,8 @@ def set_device_bid_modifiers(
     if all(v is None for v in wanted.values()):
         return _fail(tool, cid, payload, "nothing to change")
     c = _get_client()
-    ga = c.get_service("GoogleAdsService")
-    campaign_rn = c.get_service("CampaignService").campaign_path(cid, str(campaign_id))
-    q = (f"SELECT campaign_criterion.resource_name, campaign_criterion.device.type, campaign_criterion.bid_modifier "
-         f"FROM campaign_criterion WHERE campaign.id = {int(campaign_id)} AND campaign_criterion.type = 'DEVICE'")
-    existing = {r.campaign_criterion.device.type_.name: r.campaign_criterion.resource_name
-                for r in ga.search(customer_id=cid, query=q)}
     try:
-        ops = _device_ops(c, cid, campaign_rn, existing, wanted)
+        ops = _device_ops(c, cid, campaign_id, wanted)
     except ValueError as exc:
         return _fail(tool, cid, payload, str(exc))
     return _run_mutate(tool, cid, ops, confirm, payload)
