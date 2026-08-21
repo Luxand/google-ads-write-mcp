@@ -915,47 +915,58 @@ def add_image_assets(
 
 # --------------------------------------------------------------------------- removal (guarded)
 @mcp.tool()
-def remove_entity(customer_id: str, resource_name: str, confirm: bool = False) -> Dict[str, Any]:
-    """PERMANENTLY remove a campaign, ad group, ad (adGroupAds/...) or keyword (adGroupCriteria/...).
+def remove_entity(customer_id: str, resource_name: Union[str, List[str]], confirm: bool = False) -> Dict[str, Any]:
+    """PERMANENTLY remove a campaign, ad group, ad (adGroupAds/...), keyword (adGroupCriteria/...) or
+    campaign criterion such as a campaign negative keyword (campaignCriteria/...).
 
-    Refuses unless the entity sits under a campaign carrying the managed label (default
-    "claude-managed") - i.e. one created by this server. Google Ads has no restore for removed
-    entities; historical data stays in reports but the entity cannot be re-enabled.
+    resource_name may be one resource name or a list of names of the SAME kind; a list is removed
+    in one atomic mutate. Refuses unless every entity sits under a campaign carrying the managed
+    label (default "claude-managed") - i.e. one created by this server. Google Ads has no restore
+    for removed entities; historical data stays in reports but the entity cannot be re-enabled.
     Dry run unless confirm=true.
     """
     cid = _cid(customer_id)
-    payload = dict(resource_name=resource_name)
+    names = [resource_name] if isinstance(resource_name, str) else list(resource_name)
+    payload = dict(resource_names=names)
     tool = "remove_entity"
+    if not names:
+        return _fail(tool, cid, payload, "no resource names given")
+    kinds = {
+        "/campaigns/": ("campaign", "campaign", "campaign.resource_name"),
+        "/adGroups/": ("ad_group", "ad_group", "ad_group.resource_name"),
+        "/adGroupAds/": ("ad_group_ad", "ad_group_ad", "ad_group_ad.resource_name"),
+        "/adGroupCriteria/": ("ad_group_criterion", "ad_group_criterion", "ad_group_criterion.resource_name"),
+        "/campaignCriteria/": ("campaign_criterion", "campaign_criterion", "campaign_criterion.resource_name"),
+    }
+    matched = {k for n in names for k in kinds if k in n}
+    if len(matched) != 1:
+        return _fail(tool, cid, payload, "all resource names must be of one supported kind: campaigns/, adGroups/, "
+                                         "adGroupAds/, adGroupCriteria/ or campaignCriteria/")
+    kind, resource, rn_field = kinds[matched.pop()]
     c = _get_client()
     ga = c.get_service("GoogleAdsService")
-    if "/campaigns/" in resource_name:
-        q = f"SELECT campaign.name, campaign.labels FROM campaign WHERE campaign.resource_name = '{resource_name}'"
-        kind = "campaign"
-    elif "/adGroups/" in resource_name:
-        q = f"SELECT campaign.name, campaign.labels, ad_group.name FROM ad_group WHERE ad_group.resource_name = '{resource_name}'"
-        kind = "ad_group"
-    elif "/adGroupAds/" in resource_name:
-        q = f"SELECT campaign.name, campaign.labels, ad_group.name FROM ad_group_ad WHERE ad_group_ad.resource_name = '{resource_name}'"
-        kind = "ad_group_ad"
-    elif "/adGroupCriteria/" in resource_name:
-        q = (f"SELECT campaign.name, campaign.labels, ad_group_criterion.keyword.text FROM ad_group_criterion "
-             f"WHERE ad_group_criterion.resource_name = '{resource_name}'")
-        kind = "ad_group_criterion"
-    else:
-        return _fail(tool, cid, payload, "unsupported resource type; use campaigns/, adGroups/, adGroupAds/ or adGroupCriteria/")
+    in_list = ",".join(f"'{n}'" for n in names)
+    q = f"SELECT campaign.name, campaign.labels, {rn_field} FROM {resource} WHERE {rn_field} IN ({in_list})"
     rows = list(ga.search(customer_id=cid, query=q))
-    if not rows:
-        return _fail(tool, cid, payload, "entity not found (already removed, or wrong customer)")
-    camp_name = rows[0].campaign.name
-    payload["campaign_name"] = camp_name
+    found = {}
+    for r in rows:
+        obj = getattr(r, resource)
+        found[obj.resource_name] = (r.campaign.name, list(r.campaign.labels))
+    missing = [n for n in names if n not in found]
+    if missing:
+        return _fail(tool, cid, payload, f"not found (already removed, or wrong customer): {missing[:5]}")
     label_rn = _managed_label_rn(c, cid)
-    if not label_rn or label_rn not in list(rows[0].campaign.labels):
+    unmanaged = sorted({cn for cn, labels in found.values() if not label_rn or label_rn not in labels})
+    if unmanaged:
         return _fail(tool, cid, payload,
-                     f"refusing: parent campaign {camp_name!r} does not carry the {MANAGED_LABEL!r} label")
-    op = c.get_type("MutateOperation")
-    getattr(op, f"{kind}_operation").remove = resource_name
-    return _run_mutate(tool, cid, [op], confirm, payload)
-
+                     f"refusing: parent campaign(s) {unmanaged} do not carry the {MANAGED_LABEL!r} label")
+    payload["campaigns"] = sorted({cn for cn, _ in found.values()})
+    ops = []
+    for n in names:
+        op = c.get_type("MutateOperation")
+        getattr(op, f"{kind}_operation").remove = n
+        ops.append(op)
+    return _run_mutate(tool, cid, ops, confirm, payload)
 
 
 # --------------------------------------------------------------------------- keyword planner (read-only)
