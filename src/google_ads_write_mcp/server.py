@@ -6,9 +6,9 @@ Safety model
 * Every tool is a DRY RUN by default: the request is sent with ``validate_only=True``;
   Google validates auth + payload and changes nothing.  Pass ``confirm=true`` to apply.
 * Additive and status changes are exposed freely.  The one destructive tool,
-  ``remove_entity``, only touches entities under campaigns whose name starts with
-  ``MANAGED_PREFIX`` ("CLAUDE - "), i.e. campaigns this server created.  Removal in
-  Google Ads is permanent; there is no restore.
+  ``remove_entity``, only touches entities under campaigns carrying the managed label
+  (``MANAGED_LABEL``, default "claude-managed"), which ``create_search_campaign`` attaches
+  to every campaign it creates.  Removal in Google Ads is permanent; there is no restore.
 * Every call (dry run or applied) is appended to an audit log (JSONL), without secrets.
 * Credentials come from the same files the official read-only Google Ads MCP uses
   (developer-token file + Ads ADC ``authorized_user`` JSON). ``main()`` resolves them from
@@ -24,8 +24,8 @@ Configuration (environment variables, all optional):
                                     (GOOGLE_ADS_MCP_LOGIN_CUSTOMER_ID is accepted as an alias)
   GOOGLE_ADS_WRITE_AUDIT_LOG        audit log path
                                     (default ~/.local/share/google-ads-write-mcp/audit.jsonl)
-  GOOGLE_ADS_WRITE_MANAGED_PREFIX   campaign-name prefix that marks campaigns this server may
-                                    remove (default "CLAUDE - ")
+  GOOGLE_ADS_WRITE_MANAGED_LABEL    Google Ads label that marks campaigns this server created and
+                                    may remove (default "claude-managed")
 """
 from __future__ import annotations
 
@@ -49,9 +49,9 @@ DEFAULT_AUDIT_LOG = "~/.local/share/google-ads-write-mcp/audit.jsonl"
 
 AUDIT_LOG = os.path.expanduser(os.environ.get("GOOGLE_ADS_WRITE_AUDIT_LOG", DEFAULT_AUDIT_LOG))
 
-# Campaigns created by this server carry this prefix. remove_entity refuses
+# Campaigns created by this server carry this label. remove_entity refuses
 # anything that does not sit under such a campaign.
-MANAGED_PREFIX = os.environ.get("GOOGLE_ADS_WRITE_MANAGED_PREFIX", "CLAUDE - ")
+MANAGED_LABEL = os.environ.get("GOOGLE_ADS_WRITE_MANAGED_LABEL", "claude-managed")
 
 
 def _configure() -> Dict[str, str]:
@@ -71,7 +71,7 @@ def _configure() -> Dict[str, str]:
         "ads_adc": adc if os.path.isfile(adc) else f"MISSING ({adc})",
         "login_customer_id": os.environ.get("GOOGLE_ADS_LOGIN_CUSTOMER_ID") or "(none: direct accounts)",
         "audit_log": AUDIT_LOG,
-        "managed_prefix": MANAGED_PREFIX,
+        "managed_label": MANAGED_LABEL,
     }
 
 mcp = FastMCP(
@@ -80,8 +80,8 @@ mcp = FastMCP(
         "Write-side companion to the read-only Google Ads MCP. Every tool is a DRY RUN "
         "(validate_only) unless confirm=true. Use the read MCP (search) to look up ids / "
         "resource names first. The only delete tool (remove_entity) is restricted to campaigns "
-        f"named with the {MANAGED_PREFIX!r} prefix, and removal is permanent. keyword_ideas is "
-        "read-only Keyword Planner data. Customer ids may contain dashes."
+        f"carrying the {MANAGED_LABEL!r} label (attached by create_search_campaign), and removal is "
+        "permanent. keyword_ideas is read-only Keyword Planner data. Customer ids may contain dashes."
     ),
 )
 
@@ -520,6 +520,14 @@ def set_campaign_daily_budget(customer_id: str, campaign_id: str, daily_budget: 
 
 
 
+def _managed_label_rn(c: GoogleAdsClient, cid: str) -> Optional[str]:
+    """Resource name of the managed label in this account, or None if it does not exist yet."""
+    ga = c.get_service("GoogleAdsService")
+    q = f"SELECT label.resource_name FROM label WHERE label.name = '{MANAGED_LABEL}' AND label.status = 'ENABLED'"
+    rows = list(ga.search(customer_id=cid, query=q))
+    return rows[0].label.resource_name if rows else None
+
+
 # --------------------------------------------------------------------------- campaign creation
 def _rsa_checks(headlines, descriptions, path1, path2) -> Optional[str]:
     htexts = [h if isinstance(h, str) else h.get("text", "") for h in headlines]
@@ -541,7 +549,9 @@ def _ad_group_ops(c: GoogleAdsClient, cid: str, campaign_rn: str, spec: Dict[str
     """Build one ad group plus its keywords and one RSA, all referencing a temp ad-group id.
 
     spec: {"name", "final_url", "keywords": [{"text","match_type"}], "headlines", "descriptions",
-           "path1", "path2", "status"(ENABLED|PAUSED), "cpc_bid"(optional, account currency)}
+           "path1", "path2", "status"(ENABLED|PAUSED), "cpc_bid"(optional, account currency),
+           "final_url_suffix"(optional, e.g. "utm_source=google&utm_medium=cpc&utm_campaign=x__y"),
+           "negative_keywords"(optional, [{"text","match_type"}] at ad-group level)}
     Returns (ops, next_temp) or raises ValueError with a human message.
     """
     name = (spec.get("name") or "").strip()
@@ -574,7 +584,24 @@ def _ad_group_ops(c: GoogleAdsClient, cid: str, campaign_rn: str, spec: Dict[str
     ag.type_ = c.enums.AdGroupTypeEnum.SEARCH_STANDARD
     if spec.get("cpc_bid"):
         ag.cpc_bid_micros = int(round(float(spec["cpc_bid"]) * 1_000_000))
+    suffix = (spec.get("final_url_suffix") or "").strip().lstrip("?")
+    if suffix:
+        if " " in suffix or "=" not in suffix:
+            raise ValueError(f"{name}: final_url_suffix must look like key=value&key=value")
+        ag.final_url_suffix = suffix
     ops.append(op)
+
+    for kw in spec.get("negative_keywords") or []:
+        mt = (kw.get("match_type") or "PHRASE").upper()
+        if mt not in ("EXACT", "PHRASE", "BROAD"):
+            raise ValueError(f"{name}: bad negative match_type {mt!r}")
+        op = c.get_type("MutateOperation")
+        crit = op.ad_group_criterion_operation.create
+        crit.ad_group = ag_rn
+        crit.negative = True
+        crit.keyword.text = kw["text"]
+        crit.keyword.match_type = getattr(c.enums.KeywordMatchTypeEnum, mt)
+        ops.append(op)
 
     for kw in kws:
         mt = (kw.get("match_type") or "PHRASE").upper()
@@ -622,13 +649,14 @@ def create_search_campaign(
     """Create a complete Search campaign in ONE atomic mutate: budget, campaign, location and
     language criteria, campaign negatives, and every ad group with its keywords and one RSA.
 
-    name must start with "CLAUDE - " (this marks it as managed; remove_entity only works inside
-    such campaigns). The campaign is created PAUSED; enable it with set_status afterwards.
+    The campaign gets the managed label (default "claude-managed"; created in the account on first
+    use) so remove_entity can later act on it. It is created PAUSED; enable it with set_status.
     locations: geo target constant ids (United States = 2840). languages: language constant ids
     (English = 1000). bidding: MAXIMIZE_CONVERSIONS (optional target_cpa) or MAXIMIZE_CLICKS.
     Network: Google Search only (no partners, no Display).
     ad_groups: [{"name", "final_url", "keywords": [{"text","match_type"}], "headlines": [...],
-                 "descriptions": [...], "path1", "path2", "status"}, ...]
+                 "descriptions": [...], "path1", "path2", "status", "final_url_suffix",
+                 "negative_keywords": [...]}, ...]
     negative_keywords: [{"text", "match_type"}] at campaign level.
     Extensions (sitelinks, callouts, snippets, images) are separate tools - call them with the
     returned campaign id. Dry run unless confirm=true.
@@ -639,8 +667,8 @@ def create_search_campaign(
                    ad_groups=[{"name": g.get("name"), "keywords": len(g.get("keywords") or [])} for g in ad_groups],
                    negative_keywords=len(negative_keywords or []))
     tool = "create_search_campaign"
-    if not name.startswith(MANAGED_PREFIX):
-        return _fail(tool, cid, payload, f"campaign name must start with {MANAGED_PREFIX!r}")
+    if not name.strip():
+        return _fail(tool, cid, payload, "campaign name is empty")
     if not (0 < daily_budget < 100_000):
         return _fail(tool, cid, payload, "daily_budget out of range")
     if not locations or not languages:
@@ -658,6 +686,16 @@ def create_search_campaign(
     c = _get_client()
     ops: list = []
     temp = -1
+
+    label_rn = _managed_label_rn(c, cid)
+    if not label_rn:
+        label_rn = f"customers/{cid}/labels/{temp}"
+        temp -= 1
+        op = c.get_type("MutateOperation")
+        lab = op.label_operation.create
+        lab.resource_name = label_rn
+        lab.name = MANAGED_LABEL
+        ops.append(op)
 
     budget_rn = f"customers/{cid}/campaignBudgets/{temp}"
     temp -= 1
@@ -695,6 +733,12 @@ def create_search_campaign(
             camp.maximize_conversions.target_cpa_micros = 0
     else:
         camp.maximize_clicks.cpc_bid_ceiling_micros = 0
+    ops.append(op)
+
+    op = c.get_type("MutateOperation")
+    cl = op.campaign_label_operation.create
+    cl.campaign = campaign_rn
+    cl.label = label_rn
     ops.append(op)
 
     for geo in locations:
@@ -746,19 +790,23 @@ def add_ad_group(
     path1: str = "",
     path2: str = "",
     status: str = "ENABLED",
+    final_url_suffix: str = "",
+    negative_keywords: Optional[List[Dict[str, str]]] = None,
     confirm: bool = False,
 ) -> Dict[str, Any]:
-    """Add one ad group - with its keywords and one responsive search ad - to an EXISTING campaign,
-    atomically. Same argument shapes as create_search_campaign's ad_groups entries.
-    Dry run unless confirm=true."""
+    """Add one ad group - with its keywords, optional ad-group negatives, optional final URL suffix
+    and one responsive search ad - to an EXISTING campaign, atomically. Same argument shapes as
+    create_search_campaign's ad_groups entries. Dry run unless confirm=true."""
     cid = _cid(customer_id)
     payload = dict(campaign_id=campaign_id, name=name, final_url=final_url, keywords=len(keywords),
-                   headlines=len(headlines), descriptions=len(descriptions), status=status)
+                   headlines=len(headlines), descriptions=len(descriptions), status=status,
+                   final_url_suffix=final_url_suffix, negative_keywords=len(negative_keywords or []))
     tool = "add_ad_group"
     c = _get_client()
     campaign_rn = c.get_service("CampaignService").campaign_path(cid, str(campaign_id))
     spec = dict(name=name, final_url=final_url, keywords=keywords, headlines=headlines,
-                descriptions=descriptions, path1=path1, path2=path2, status=status)
+                descriptions=descriptions, path1=path1, path2=path2, status=status,
+                final_url_suffix=final_url_suffix, negative_keywords=negative_keywords or [])
     try:
         ops, _ = _ad_group_ops(c, cid, campaign_rn, spec, -1)
     except ValueError as exc:
@@ -870,9 +918,10 @@ def add_image_assets(
 def remove_entity(customer_id: str, resource_name: str, confirm: bool = False) -> Dict[str, Any]:
     """PERMANENTLY remove a campaign, ad group, ad (adGroupAds/...) or keyword (adGroupCriteria/...).
 
-    Refuses unless the entity sits under a campaign whose name starts with "CLAUDE - " - i.e.
-    one created by this server. Google Ads has no restore for removed entities; historical
-    data stays in reports but the entity cannot be re-enabled. Dry run unless confirm=true.
+    Refuses unless the entity sits under a campaign carrying the managed label (default
+    "claude-managed") - i.e. one created by this server. Google Ads has no restore for removed
+    entities; historical data stays in reports but the entity cannot be re-enabled.
+    Dry run unless confirm=true.
     """
     cid = _cid(customer_id)
     payload = dict(resource_name=resource_name)
@@ -880,16 +929,16 @@ def remove_entity(customer_id: str, resource_name: str, confirm: bool = False) -
     c = _get_client()
     ga = c.get_service("GoogleAdsService")
     if "/campaigns/" in resource_name:
-        q = f"SELECT campaign.name, campaign.status FROM campaign WHERE campaign.resource_name = '{resource_name}'"
+        q = f"SELECT campaign.name, campaign.labels FROM campaign WHERE campaign.resource_name = '{resource_name}'"
         kind = "campaign"
     elif "/adGroups/" in resource_name:
-        q = f"SELECT campaign.name, ad_group.name FROM ad_group WHERE ad_group.resource_name = '{resource_name}'"
+        q = f"SELECT campaign.name, campaign.labels, ad_group.name FROM ad_group WHERE ad_group.resource_name = '{resource_name}'"
         kind = "ad_group"
     elif "/adGroupAds/" in resource_name:
-        q = f"SELECT campaign.name, ad_group.name FROM ad_group_ad WHERE ad_group_ad.resource_name = '{resource_name}'"
+        q = f"SELECT campaign.name, campaign.labels, ad_group.name FROM ad_group_ad WHERE ad_group_ad.resource_name = '{resource_name}'"
         kind = "ad_group_ad"
     elif "/adGroupCriteria/" in resource_name:
-        q = (f"SELECT campaign.name, ad_group_criterion.keyword.text FROM ad_group_criterion "
+        q = (f"SELECT campaign.name, campaign.labels, ad_group_criterion.keyword.text FROM ad_group_criterion "
              f"WHERE ad_group_criterion.resource_name = '{resource_name}'")
         kind = "ad_group_criterion"
     else:
@@ -899,9 +948,10 @@ def remove_entity(customer_id: str, resource_name: str, confirm: bool = False) -
         return _fail(tool, cid, payload, "entity not found (already removed, or wrong customer)")
     camp_name = rows[0].campaign.name
     payload["campaign_name"] = camp_name
-    if not camp_name.startswith(MANAGED_PREFIX):
+    label_rn = _managed_label_rn(c, cid)
+    if not label_rn or label_rn not in list(rows[0].campaign.labels):
         return _fail(tool, cid, payload,
-                     f"refusing: parent campaign {camp_name!r} is not managed (no {MANAGED_PREFIX!r} prefix)")
+                     f"refusing: parent campaign {camp_name!r} does not carry the {MANAGED_LABEL!r} label")
     op = c.get_type("MutateOperation")
     getattr(op, f"{kind}_operation").remove = resource_name
     return _run_mutate(tool, cid, [op], confirm, payload)

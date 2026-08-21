@@ -18,9 +18,10 @@ Works with Claude Code (and any MCP client over stdio).
   toggle ENABLED/PAUSED, or tune budget and target CPA. Nothing edits existing
   ad text. New campaigns are created PAUSED.
 - **One guarded delete.** `remove_entity` refuses anything that does not sit
-  under a campaign whose name starts with the managed prefix (default
-  `CLAUDE - `), and verifies that with a read query first. Removal in Google Ads
-  is permanent; there is no restore.
+  under a campaign carrying the managed label (default `claude-managed`, which
+  `create_search_campaign` attaches to every campaign it creates), and verifies
+  that with a read query first. Removal in Google Ads is permanent; there is no
+  restore.
 - **Audited.** Every call — dry run or applied, success or rejection — is
   appended to a local JSONL audit log with timestamp, tool, customer, payload
   and API result. No secrets are written.
@@ -32,8 +33,8 @@ Works with Claude Code (and any MCP client over stdio).
 
 | Tool | Purpose |
 |---|---|
-| `create_search_campaign` | Build a complete Search campaign in one atomic mutate: budget, campaign, location and language criteria, campaign negatives, every ad group with its keywords and one responsive search ad. Name must start with the managed prefix; created PAUSED; Google Search only; Maximize conversions (optional target CPA) or Maximize clicks |
-| `add_ad_group` | Add one ad group with keywords and one RSA to an existing campaign |
+| `create_search_campaign` | Build a complete Search campaign in one atomic mutate: budget, campaign, location and language criteria, campaign negatives, the managed label, every ad group with its keywords, optional ad-group negatives, optional final URL suffix (UTMs) and one responsive search ad. Created PAUSED; Google Search only; Maximize conversions (optional target CPA) or Maximize clicks |
+| `add_ad_group` | Add one ad group with keywords, optional negatives, optional final URL suffix and one RSA to an existing campaign |
 | `create_responsive_search_ad` | Add a new RSA to an ad group (existing ads untouched) |
 | `add_keywords` | Add positive keywords to an ad group |
 | `add_negative_keywords` | Add negatives at campaign or ad-group level |
@@ -42,7 +43,7 @@ Works with Claude Code (and any MCP client over stdio).
 | `set_status` | ENABLED / PAUSED on a campaign, ad group, ad or keyword |
 | `set_campaign_daily_budget` | Change a campaign's non-shared daily budget |
 | `set_campaign_target_cpa` | Set tCPA on a Maximize-conversions campaign |
-| `remove_entity` | Permanently remove a campaign, ad group, ad or keyword — only under a managed-prefix campaign |
+| `remove_entity` | Permanently remove a campaign, ad group, ad or keyword — only under a campaign carrying the managed label |
 | `keyword_ideas` | Keyword Planner ideas with monthly volume and bid ranges (read-only, 1 request/second) |
 | `audit_log_tail` | Last N audit-log entries |
 
@@ -66,12 +67,13 @@ Keep the token and the ADC file out of any repository.
 ## Install
 
 ```bash
-pipx install "git+https://github.com/Luxand/google-ads-write-mcp@v0.1.0"
+pipx install "git+https://github.com/Luxand/google-ads-write-mcp@v0.2.0"
 google-ads-write-mcp --check        # shows which credential files it found; no secrets printed
 google-ads-write-mcp --list-tools
 ```
 
-Upgrade later with `pipx upgrade google-ads-write-mcp` or reinstall at a new tag.
+The install is pinned to a tag, so `pipx upgrade` will not move it; upgrade
+with `pipx install --force "git+https://github.com/Luxand/google-ads-write-mcp@<new tag>"`.
 
 ## Configuration
 
@@ -84,7 +86,7 @@ Everything is optional if the defaults fit:
 | `GOOGLE_APPLICATION_CREDENTIALS` | Ads ADC JSON | `~/.config/google-ads-mcp/gcloud/application_default_credentials.json` |
 | `GOOGLE_ADS_LOGIN_CUSTOMER_ID` | manager (MCC) id when the target account sits under one; `GOOGLE_ADS_MCP_LOGIN_CUSTOMER_ID` is accepted as an alias | none |
 | `GOOGLE_ADS_WRITE_AUDIT_LOG` | audit log path | `~/.local/share/google-ads-write-mcp/audit.jsonl` |
-| `GOOGLE_ADS_WRITE_MANAGED_PREFIX` | campaign-name prefix `remove_entity` is allowed to touch | `CLAUDE - ` |
+| `GOOGLE_ADS_WRITE_MANAGED_LABEL` | Google Ads label that marks campaigns `remove_entity` may touch; created in the account on first use | `claude-managed` |
 
 A login customer id applies to the whole client, so register one server entry
 per manager context you need.
