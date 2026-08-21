@@ -43,6 +43,7 @@ Works with Claude Code (and any MCP client over stdio).
 | `set_status` | ENABLED / PAUSED on a campaign, ad group, ad or keyword |
 | `set_campaign_daily_budget` | Change a campaign's non-shared daily budget |
 | `set_campaign_target_cpa` | Set tCPA on a Maximize-conversions campaign |
+| `set_final_urls` | Update final URLs (ads, assets) and final URL suffixes (ad groups, ads) in one atomic mutate — e.g. move UTMs into the final URL itself |
 | `set_device_bid_modifiers` | Campaign-level device bid adjustments in percent; −100 excludes a device (mobile-only = desktop −100, tablet −100). `create_search_campaign` accepts the same as `device_bid_modifiers` |
 | `remove_entity` | Permanently remove a campaign, ad group, ad, keyword or campaign criterion (e.g. a campaign negative) — one resource name or a list of the same kind, atomically — only under a campaign carrying the managed label |
 | `keyword_ideas` | Keyword Planner ideas with monthly volume and bid ranges (read-only, 1 request/second) |
@@ -68,7 +69,7 @@ Keep the token and the ADC file out of any repository.
 ## Install
 
 ```bash
-pipx install "git+https://github.com/Luxand/google-ads-write-mcp@v0.3.1"
+pipx install "git+https://github.com/Luxand/google-ads-write-mcp@v0.4.0"
 google-ads-write-mcp --check        # shows which credential files it found; no secrets printed
 google-ads-write-mcp --list-tools
 ```

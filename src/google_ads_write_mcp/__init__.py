@@ -1,2 +1,2 @@
 """google-ads-write-mcp: allow-listed write-side MCP server for Google Ads, plus Keyword Planner ideas."""
-__version__ = "0.3.1"
+__version__ = "0.4.0"

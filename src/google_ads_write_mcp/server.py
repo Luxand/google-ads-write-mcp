@@ -978,6 +978,71 @@ def remove_entity(customer_id: str, resource_name: Union[str, List[str]], confir
 
 
 
+
+# --------------------------------------------------------------------------- URL updates
+@mcp.tool()
+def set_final_urls(customer_id: str, targets: List[Dict[str, Any]], confirm: bool = False) -> Dict[str, Any]:
+    """Update final URLs and/or final URL suffixes in one atomic mutate.
+
+    targets: [{"resource_name": <ad (adGroupAds/..~..) | ad group (adGroups/..) | asset (assets/..)>,
+               "final_url": "https://..." (ads and assets),
+               "final_url_suffix": "utm_..." or "" to clear (ad groups and ads)}, ...]
+    Ads keep their text and history: Google allows changing an ad's final URLs in place.
+    Typical use: move UTMs from an ad-group suffix into the final URL itself, or retag a campaign.
+    Dry run unless confirm=true.
+    """
+    cid = _cid(customer_id)
+    payload = dict(targets=targets)
+    tool = "set_final_urls"
+    if not targets:
+        return _fail(tool, cid, payload, "no targets given")
+    c = _get_client()
+    ops = []
+    for t in targets:
+        rn = t.get("resource_name") or ""
+        url = t.get("final_url")
+        suffix = t.get("final_url_suffix")
+        if url is not None and not str(url).startswith("http"):
+            return _fail(tool, cid, payload, f"{rn}: final_url must be an absolute http(s) URL")
+        if suffix is not None and (" " in suffix or (suffix and "=" not in suffix)):
+            return _fail(tool, cid, payload, f"{rn}: final_url_suffix must look like key=value&key=value (or empty)")
+        op = c.get_type("MutateOperation")
+        if "/adGroupAds/" in rn:
+            ad_id = rn.rsplit("~", 1)[-1]
+            ad = op.ad_operation.update
+            ad.resource_name = f"customers/{cid}/ads/{ad_id}"
+            if url is not None:
+                del ad.final_urls[:]
+                ad.final_urls.append(url)
+            if suffix is not None:
+                ad.final_url_suffix = suffix
+            if url is None and suffix is None:
+                return _fail(tool, cid, payload, f"{rn}: give final_url and/or final_url_suffix")
+            op.ad_operation.update_mask.CopyFrom(protobuf_helpers.field_mask(None, ad._pb))
+        elif "/adGroups/" in rn:
+            if suffix is None:
+                return _fail(tool, cid, payload, f"{rn}: ad groups take final_url_suffix only")
+            ag = op.ad_group_operation.update
+            ag.resource_name = rn
+            ag.final_url_suffix = suffix
+            mask = protobuf_helpers.field_mask(None, ag._pb)
+            if "final_url_suffix" not in mask.paths:
+                mask.paths.append("final_url_suffix")      # clearing to "" must still be in the mask
+            op.ad_group_operation.update_mask.CopyFrom(mask)
+        elif "/assets/" in rn:
+            if url is None:
+                return _fail(tool, cid, payload, f"{rn}: assets take final_url only")
+            asset = op.asset_operation.update
+            asset.resource_name = rn
+            del asset.final_urls[:]
+            asset.final_urls.append(url)
+            op.asset_operation.update_mask.CopyFrom(protobuf_helpers.field_mask(None, asset._pb))
+        else:
+            return _fail(tool, cid, payload, f"unsupported resource: {rn}")
+        ops.append(op)
+    return _run_mutate(tool, cid, ops, confirm, payload)
+
+
 # --------------------------------------------------------------------------- device bid modifiers
 # Google's fixed criterion ids for device criteria (campaignCriteria/<campaign>~<id>).
 _DEVICE_IDS = {"DESKTOP": 30000, "MOBILE": 30001, "TABLET": 30002}
