@@ -38,7 +38,7 @@ Works with Claude Code (and any MCP client over stdio).
 | `create_responsive_search_ad` | Add a new RSA to an ad group (existing ads untouched) |
 | `add_keywords` | Add positive keywords to an ad group |
 | `add_negative_keywords` | Add negatives at campaign or ad-group level |
-| `add_sitelinks` / `add_callouts` / `add_structured_snippet` | Create the assets and attach them to a campaign |
+| `add_sitelinks` / `add_callouts` / `add_structured_snippet` | Create the assets and attach them to a campaign; `add_sitelinks` can attach to one ad group instead (`ad_group_id`) |
 | `add_image_assets` | Upload PNG/JPEG files and attach them to a Search campaign (`AD_IMAGE`); validates 1:1 / 1.91:1 shape, minimum size and 5 MB cap |
 | `set_status` | ENABLED / PAUSED on a campaign, ad group, ad or keyword |
 | `set_campaign_daily_budget` | Change a campaign's non-shared daily budget |
@@ -69,7 +69,7 @@ Keep the token and the ADC file out of any repository.
 ## Install
 
 ```bash
-pipx install "git+https://github.com/Luxand/google-ads-write-mcp@v0.4.1"
+pipx install "git+https://github.com/Luxand/google-ads-write-mcp@v0.5.0"
 google-ads-write-mcp --check        # shows which credential files it found; no secrets printed
 google-ads-write-mcp --list-tools
 ```

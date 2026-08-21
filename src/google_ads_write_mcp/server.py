@@ -340,10 +340,13 @@ def add_negative_keywords(
     return _run_mutate(tool, cid, ops, confirm, payload)
 
 
-def _campaign_asset_ops(c: GoogleAdsClient, cid: str, campaign_id: str, assets: list, field_type: str):
-    """Create N assets with temp ids and link each to the campaign, atomically."""
+def _campaign_asset_ops(c: GoogleAdsClient, cid: str, campaign_id: str, assets: list, field_type: str,
+                        ad_group_id: Optional[str] = None):
+    """Create N assets with temp ids and link each to the campaign - or, if ad_group_id is given,
+    to that ad group (ad-group-level assets override campaign-level ones of the same type) - atomically."""
     ops = []
-    camp_rn = c.get_service("CampaignService").campaign_path(cid, str(campaign_id))
+    camp_rn = c.get_service("CampaignService").campaign_path(cid, str(campaign_id)) if campaign_id else None
+    ag_rn = c.get_service("AdGroupService").ad_group_path(cid, str(ad_group_id)) if ad_group_id else None
     for i, fill in enumerate(assets, start=1):
         temp_rn = f"customers/{cid}/assets/-{i}"
         op = c.get_type("MutateOperation")
@@ -352,21 +355,28 @@ def _campaign_asset_ops(c: GoogleAdsClient, cid: str, campaign_id: str, assets: 
         fill(asset)
         ops.append(op)
         link = c.get_type("MutateOperation")
-        ca = link.campaign_asset_operation.create
-        ca.campaign = camp_rn
-        ca.asset = temp_rn
-        ca.field_type = getattr(c.enums.AssetFieldTypeEnum, field_type)
+        if ag_rn:
+            la = link.ad_group_asset_operation.create
+            la.ad_group = ag_rn
+        else:
+            la = link.campaign_asset_operation.create
+            la.campaign = camp_rn
+        la.asset = temp_rn
+        la.field_type = getattr(c.enums.AssetFieldTypeEnum, field_type)
         ops.append(link)
     return ops
 
 
 @mcp.tool()
-def add_sitelinks(customer_id: str, campaign_id: str, sitelinks: List[Dict[str, str]], confirm: bool = False) -> Dict[str, Any]:
-    """Create sitelink assets and attach them to a campaign.
+def add_sitelinks(customer_id: str, campaign_id: str, sitelinks: List[Dict[str, str]], confirm: bool = False,
+                  ad_group_id: Optional[str] = None) -> Dict[str, Any]:
+    """Create sitelink assets and attach them to a campaign, or to one ad group when ad_group_id is given
+    (ad-group sitelinks override the campaign's for that ad group).
     sitelinks: [{"link_text": <=25 chars, "final_url": "https://...", "description1": <=35, "description2": <=35}, ...]
+    Link text must be unique and URLs should differ (Google will not serve two sitelinks with the same URL together).
     Dry run unless confirm=true."""
     cid = _cid(customer_id)
-    payload = dict(campaign_id=campaign_id, sitelinks=sitelinks)
+    payload = dict(campaign_id=campaign_id, ad_group_id=ad_group_id, sitelinks=sitelinks)
     tool = "add_sitelinks"
     if not sitelinks:
         return _fail(tool, cid, payload, "no sitelinks given")
