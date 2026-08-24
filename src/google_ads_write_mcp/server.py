@@ -653,6 +653,7 @@ def create_search_campaign(
     ad_groups: List[Dict[str, Any]],
     bidding: str = "MAXIMIZE_CONVERSIONS",
     target_cpa: Optional[float] = None,
+    cpc_bid_ceiling: Optional[float] = None,
     negative_keywords: Optional[List[Dict[str, str]]] = None,
     confirm: bool = False,
 ) -> Dict[str, Any]:
@@ -661,8 +662,11 @@ def create_search_campaign(
 
     The campaign gets the managed label (default "claude-managed"; created in the account on first
     use) so remove_entity can later act on it. It is created PAUSED; enable it with set_status.
-    locations: geo target constant ids (United States = 2840). languages: language constant ids
-    (English = 1000); an empty list means "all languages" (no language criterion is created). bidding: MAXIMIZE_CONVERSIONS (optional target_cpa) or MAXIMIZE_CLICKS.
+    locations: geo target constant ids (United States = 2840); location targeting is created
+    presence-only (positive and negative geo_target_type = PRESENCE). languages: language constant ids
+    (English = 1000); an empty list means "all languages" (no language criterion is created). bidding: MAXIMIZE_CONVERSIONS (optional target_cpa) or MAXIMIZE_CLICKS (optional cpc_bid_ceiling in
+    account currency; omitted = uncapped).
+    Headlines/descriptions accept plain strings or {"text", "pin": "H1".."H3" | "D1" | "D2"}.
     Network: Google Search only (no partners, no Display).
     ad_groups: [{"name", "final_url", "keywords": [{"text","match_type"}], "headlines": [...],
                  "descriptions": [...], "path1", "path2", "status", "final_url_suffix",
@@ -675,7 +679,7 @@ def create_search_campaign(
     """
     cid = _cid(customer_id)
     payload = dict(name=name, daily_budget=daily_budget, locations=locations, languages=languages,
-                   bidding=bidding, target_cpa=target_cpa,
+                   bidding=bidding, target_cpa=target_cpa, cpc_bid_ceiling=cpc_bid_ceiling,
                    ad_groups=[{"name": g.get("name"), "keywords": len(g.get("keywords") or [])} for g in ad_groups],
                    negative_keywords=len(negative_keywords or []))
     tool = "create_search_campaign"
@@ -692,6 +696,11 @@ def create_search_campaign(
         return _fail(tool, cid, payload, "bidding must be MAXIMIZE_CONVERSIONS or MAXIMIZE_CLICKS")
     if target_cpa is not None and not (0 < target_cpa < 10_000):
         return _fail(tool, cid, payload, "target_cpa out of range")
+    if cpc_bid_ceiling is not None:
+        if bidding != "MAXIMIZE_CLICKS":
+            return _fail(tool, cid, payload, "cpc_bid_ceiling is only valid with MAXIMIZE_CLICKS")
+        if not (0 < cpc_bid_ceiling < 1_000):
+            return _fail(tool, cid, payload, "cpc_bid_ceiling out of range")
     names = [g.get("name") for g in ad_groups]
     if len(set(names)) != len(names):
         return _fail(tool, cid, payload, "duplicate ad group names")
@@ -745,7 +754,10 @@ def create_search_campaign(
         else:
             camp.maximize_conversions.target_cpa_micros = 0
     else:
-        camp.maximize_clicks.cpc_bid_ceiling_micros = 0
+        # Maximize clicks is the TargetSpend strategy on Campaign — there is no
+        # maximize_clicks field on the proto; assigning it raises AttributeError.
+        camp.target_spend.cpc_bid_ceiling_micros = (
+            int(round(cpc_bid_ceiling * 1_000_000)) if cpc_bid_ceiling else 0)
     ops.append(op)
 
     op = c.get_type("MutateOperation")
@@ -922,6 +934,89 @@ def add_image_assets(
         ca.campaign = camp_rn
         ca.asset = asset_rn
         ca.field_type = c.enums.AssetFieldTypeEnum.AD_IMAGE
+        ops.append(link)
+    return _run_mutate(tool, cid, ops, confirm, payload)
+
+
+@mcp.tool()
+def add_business_assets(
+    customer_id: str,
+    campaign_id: str,
+    business_name: Optional[str] = None,
+    logo_path: Optional[str] = None,
+    logo_asset_resource_name: Optional[str] = None,
+    confirm: bool = False,
+) -> Dict[str, Any]:
+    """Attach a business name and/or business logo to a Search campaign.
+
+    business_name (<=25 chars, Google's limit) is created as a TEXT asset and linked as
+    BUSINESS_NAME. For the logo pass logo_path (absolute PNG/JPEG, square within 2%,
+    >=128x128, <=5 MB; 1200x1200 recommended) to upload a new asset, or
+    logo_asset_resource_name to re-link an image asset the account already holds; either is
+    linked as BUSINESS_LOGO. At least one input is required. Dry run unless confirm=true.
+    """
+    cid = _cid(customer_id)
+    tool = "add_business_assets"
+    payload: Dict[str, Any] = dict(campaign_id=campaign_id, business_name=business_name,
+                                   logo_path=logo_path,
+                                   logo_asset_resource_name=logo_asset_resource_name)
+    if not business_name and not logo_path and not logo_asset_resource_name:
+        return _fail(tool, cid, payload, "nothing to attach: pass business_name and/or a logo")
+    if logo_path and logo_asset_resource_name:
+        return _fail(tool, cid, payload, "pass either logo_path or logo_asset_resource_name")
+    c = _get_client()
+    camp_rn = c.get_service("CampaignService").campaign_path(cid, str(campaign_id))
+    ops = []
+    if business_name:
+        bn = business_name.strip()
+        if not bn or len(bn) > 25:
+            return _fail(tool, cid, payload, f"business_name must be 1-25 chars, got {len(bn)}")
+        name_rn = f"customers/{cid}/assets/-1"
+        op = c.get_type("MutateOperation")
+        asset = op.asset_operation.create
+        asset.resource_name = name_rn
+        asset.type_ = c.enums.AssetTypeEnum.TEXT
+        asset.text_asset.text = bn
+        ops.append(op)
+        link = c.get_type("MutateOperation")
+        ca = link.campaign_asset_operation.create
+        ca.campaign = camp_rn
+        ca.asset = name_rn
+        ca.field_type = c.enums.AssetFieldTypeEnum.BUSINESS_NAME
+        ops.append(link)
+    logo_rn = logo_asset_resource_name
+    if logo_path:
+        if not os.path.isabs(logo_path) or not os.path.isfile(logo_path):
+            return _fail(tool, cid, payload, f"logo_path must be an absolute path to an existing file: {logo_path!r}")
+        if not logo_path.lower().endswith((".png", ".jpg", ".jpeg")):
+            return _fail(tool, cid, payload, f"only PNG/JPEG are accepted: {logo_path!r}")
+        with open(logo_path, "rb") as fh:
+            data = fh.read()
+        if len(data) > _MAX_IMAGE_BYTES:
+            return _fail(tool, cid, payload, f"{logo_path}: {len(data)} bytes exceeds 5 MB")
+        dims = _image_dims(data)
+        if not dims:
+            return _fail(tool, cid, payload, f"{logo_path}: could not read image dimensions")
+        w, h = dims
+        if w < 128 or h < 128:
+            return _fail(tool, cid, payload, f"{logo_path}: {w}x{h} below the 128x128 logo minimum")
+        if abs((w / h) - 1.0) > 0.02:
+            return _fail(tool, cid, payload, f"{logo_path}: logo must be square, got {w}x{h}")
+        logo_rn = f"customers/{cid}/assets/-2"
+        op = c.get_type("MutateOperation")
+        asset = op.asset_operation.create
+        asset.resource_name = logo_rn
+        asset.name = os.path.splitext(os.path.basename(logo_path))[0]
+        asset.type_ = c.enums.AssetTypeEnum.IMAGE
+        asset.image_asset.data = data
+        ops.append(op)
+        payload["logo"] = {"bytes": len(data), "dims": f"{w}x{h}"}
+    if logo_rn:
+        link = c.get_type("MutateOperation")
+        ca = link.campaign_asset_operation.create
+        ca.campaign = camp_rn
+        ca.asset = logo_rn
+        ca.field_type = c.enums.AssetFieldTypeEnum.BUSINESS_LOGO
         ops.append(link)
     return _run_mutate(tool, cid, ops, confirm, payload)
 
