@@ -1219,6 +1219,79 @@ def set_device_bid_modifiers(
     return _run_mutate(tool, cid, ops, confirm, payload)
 
 
+def _location_ops(c: GoogleAdsClient, cid: str, campaign_id: str, modifiers: Dict[str, Optional[float]]):
+    """modifiers: {"2840": 30, "2344": -30, "geoTargetConstants/2410": 0} as percent adjustments on the
+    campaign's EXISTING positive location criteria. Location criteria are real rows (unlike devices), so
+    the resource names come from a read; a geo the campaign does not target is an error rather than a
+    silent add — this tool never changes targeting. 0 resets the adjustment (bid_modifier 1.0). The
+    update mask names bid_modifier explicitly for the same reason as _device_ops."""
+    ga = c.get_service("GoogleAdsService")
+    q = (
+        "SELECT campaign.id, campaign_criterion.resource_name, "
+        "campaign_criterion.location.geo_target_constant, campaign_criterion.bid_modifier "
+        f"FROM campaign_criterion WHERE campaign.id = {int(campaign_id)} "
+        "AND campaign_criterion.type = LOCATION AND campaign_criterion.negative = FALSE"
+    )
+    targeted: Dict[str, str] = {}
+    for row in ga.search(customer_id=cid, query=q):
+        geo = str(row.campaign_criterion.location.geo_target_constant)
+        targeted[geo.rsplit("/", 1)[-1]] = row.campaign_criterion.resource_name
+    ops = []
+    for key, pct in modifiers.items():
+        if pct is None:
+            continue
+        gid = str(key).strip().rsplit("/", 1)[-1]
+        if not gid.isdigit():
+            raise ValueError(f"{key!r}: use a geo target constant id such as 2840 or geoTargetConstants/2840")
+        if gid not in targeted:
+            raise ValueError(
+                f"campaign {campaign_id} does not target geoTargetConstants/{gid} "
+                f"(targeted: {', '.join(sorted(targeted)) or 'none'}); this tool never adds locations"
+            )
+        if not (-90 <= float(pct) <= 900):
+            raise ValueError(
+                f"geoTargetConstants/{gid}: location adjustments must be between -90 and +900 percent "
+                "(-100 is not valid for locations; exclude a location with a negative criterion instead)"
+            )
+        op = c.get_type("MutateOperation")
+        crit = op.campaign_criterion_operation.update
+        crit.resource_name = targeted[gid]
+        crit.bid_modifier = round(1 + float(pct) / 100.0, 2)
+        op.campaign_criterion_operation.update_mask.paths.append("bid_modifier")
+        ops.append(op)
+    return ops
+
+
+@mcp.tool()
+def set_location_bid_modifiers(
+    customer_id: str,
+    campaign_id: str,
+    modifiers: Dict[str, float],
+    confirm: bool = False,
+) -> Dict[str, Any]:
+    """Set campaign-level LOCATION bid adjustments in percent (-90 to +900) on locations the campaign
+    already targets. modifiers maps a geo target constant id (2840 = US, 2344 = Hong Kong; also accepts
+    "geoTargetConstants/2840") to the adjustment: {"2840": 30, "2344": -30}. 0 removes an adjustment.
+    Honoured by Manual CPC and Maximize clicks; Smart Bidding (tCPA / Maximize conversions) ignores
+    location adjustments. Targeting is never changed: a geo the campaign does not target is rejected.
+    One atomic mutate; dry run unless confirm=true."""
+    cid = _cid(customer_id)
+    payload = dict(campaign_id=campaign_id, modifiers=modifiers)
+    tool = "set_location_bid_modifiers"
+    if not modifiers:
+        return _fail(tool, cid, payload, "nothing to change")
+    c = _get_client()
+    try:
+        ops = _location_ops(c, cid, campaign_id, modifiers)
+    except ValueError as exc:
+        return _fail(tool, cid, payload, str(exc))
+    except GoogleAdsException as exc:
+        return _fail(tool, cid, payload, f"could not read campaign locations: {exc.failure.errors[0].message if exc.failure.errors else exc}")
+    if not ops:
+        return _fail(tool, cid, payload, "nothing to change")
+    return _run_mutate(tool, cid, ops, confirm, payload)
+
+
 # --------------------------------------------------------------------------- keyword planner (read-only)
 _KP_MIN_INTERVAL = 1.1          # GenerateKeywordIdeas is capped at 1 request/second per customer id
 _kp_last_call = [0.0]
