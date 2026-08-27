@@ -502,6 +502,24 @@ def set_campaign_target_cpa(customer_id: str, campaign_id: str, target_cpa: floa
 
 
 @mcp.tool()
+def set_campaign_cpc_ceiling(customer_id: str, campaign_id: str, cpc_bid_ceiling: float, confirm: bool = False) -> Dict[str, Any]:
+    """Set the max CPC bid ceiling (account currency, e.g. 5.0) of a campaign that uses Maximize Clicks
+    (Campaign.target_spend). Pass 0 to remove the ceiling. Dry run unless confirm=true."""
+    cid = _cid(customer_id)
+    payload = dict(campaign_id=campaign_id, cpc_bid_ceiling=cpc_bid_ceiling)
+    tool = "set_campaign_cpc_ceiling"
+    if not (0 <= cpc_bid_ceiling < 1_000):
+        return _fail(tool, cid, payload, "cpc_bid_ceiling out of range")
+    c = _get_client()
+    op = c.get_type("MutateOperation")
+    camp = op.campaign_operation.update
+    camp.resource_name = c.get_service("CampaignService").campaign_path(cid, str(campaign_id))
+    camp.target_spend.cpc_bid_ceiling_micros = int(round(cpc_bid_ceiling * 1_000_000))
+    op.campaign_operation.update_mask.CopyFrom(protobuf_helpers.field_mask(None, camp._pb))
+    return _run_mutate(tool, cid, [op], confirm, payload)
+
+
+@mcp.tool()
 def set_campaign_daily_budget(customer_id: str, campaign_id: str, daily_budget: float, confirm: bool = False) -> Dict[str, Any]:
     """Set a campaign's daily budget (account currency). Refuses if the budget is shared with other campaigns.
     Dry run unless confirm=true."""
