@@ -44,6 +44,7 @@ Works with Claude Code (and any MCP client over stdio).
 | `set_status` | ENABLED / PAUSED on a campaign, ad group, ad or keyword |
 | `set_campaign_daily_budget` | Change a campaign's non-shared daily budget |
 | `set_campaign_target_cpa` | Set tCPA on a Maximize-conversions campaign |
+| `set_campaign_cpc_ceiling` | Set (or remove with 0) the max-CPC ceiling on a Maximize-Clicks campaign (`target_spend.cpc_bid_ceiling_micros`) |
 | `set_final_urls` | Update final URLs (ads, assets) and final URL suffixes (ad groups, ads) in one atomic mutate — e.g. move UTMs into the final URL itself |
 | `set_device_bid_modifiers` | Campaign-level device bid adjustments in percent; −100 excludes a device (mobile-only = desktop −100, tablet −100). Call it after `create_search_campaign` with the returned campaign id |
 | `remove_entity` | Permanently remove a campaign, ad group, ad, keyword, campaign criterion (e.g. a campaign negative) or an asset link (campaign/ad-group asset) — one resource name or a list of the same kind, atomically — only under a campaign carrying the managed label |
