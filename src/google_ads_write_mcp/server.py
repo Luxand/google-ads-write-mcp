@@ -1164,6 +1164,113 @@ def set_final_urls(customer_id: str, targets: List[Dict[str, Any]], confirm: boo
     return _run_mutate(tool, cid, ops, confirm, payload)
 
 
+# --------------------------------------------------------------------------- in-place RSA edit
+@mcp.tool()
+def update_responsive_search_ad(
+    customer_id: str,
+    ad_id: str,
+    headlines: Optional[List[Union[str, Dict[str, str]]]] = None,
+    descriptions: Optional[List[Union[str, Dict[str, str]]]] = None,
+    path1: Optional[str] = None,
+    path2: Optional[str] = None,
+    final_url: Optional[str] = None,
+    confirm: bool = False,
+) -> Dict[str, Any]:
+    """Edit an EXISTING responsive search ad in place (AdService update): the ad keeps its id and
+    reporting history, goes back through policy review, and its asset performance labels / Ad
+    Strength reset. Every argument left None is unchanged. headlines / descriptions, when given,
+    REPLACE the whole list (3-15 headlines <=30 chars, 2-4 descriptions <=90 chars; items are strings
+    or {"text", "pin": "HEADLINE_1|HEADLINE_2|HEADLINE_3|DESCRIPTION_1|DESCRIPTION_2"}). path1 / path2:
+    "" clears. ad_id: the numeric ad id or an adGroupAds/<group>~<ad> resource name.
+    Dry run unless confirm=true.
+    """
+    cid = _cid(customer_id)
+    payload = dict(ad_id=ad_id, headlines=headlines, descriptions=descriptions, path1=path1, path2=path2,
+                   final_url=final_url)
+    tool = "update_responsive_search_ad"
+    ad_num = str(ad_id).rsplit("~", 1)[-1].rsplit("/", 1)[-1]
+    if not ad_num.isdigit():
+        return _fail(tool, cid, payload, f"cannot parse an ad id from {ad_id!r}")
+    if headlines is None and descriptions is None and path1 is None and path2 is None and final_url is None:
+        return _fail(tool, cid, payload, "nothing to change: give headlines, descriptions, path1, path2 or final_url")
+    if headlines is not None:
+        htexts = [h if isinstance(h, str) else h.get("text", "") for h in headlines]
+        if not (3 <= len(htexts) <= 15):
+            return _fail(tool, cid, payload, f"need 3-15 headlines, got {len(htexts)}")
+        if len(set(htexts)) != len(htexts):
+            return _fail(tool, cid, payload, "duplicate headline text")
+        err = _len_check(htexts, 30, "headline")
+        if err:
+            return _fail(tool, cid, payload, err)
+    if descriptions is not None:
+        dtexts = [d if isinstance(d, str) else d.get("text", "") for d in descriptions]
+        if not (2 <= len(dtexts) <= 4):
+            return _fail(tool, cid, payload, f"need 2-4 descriptions, got {len(dtexts)}")
+        err = _len_check(dtexts, 90, "description")
+        if err:
+            return _fail(tool, cid, payload, err)
+    for label, p in (("path1", path1), ("path2", path2)):
+        if p:
+            err = _len_check([p], 15, label)
+            if err:
+                return _fail(tool, cid, payload, err)
+    if final_url is not None and not str(final_url).startswith("http"):
+        return _fail(tool, cid, payload, "final_url must be an absolute http(s) URL")
+    c = _get_client()
+    op = c.get_type("MutateOperation")
+    ad = op.ad_operation.update
+    ad.resource_name = f"customers/{cid}/ads/{ad_num}"
+    paths = []
+    try:
+        if headlines is not None:
+            del ad.responsive_search_ad.headlines[:]
+            ad.responsive_search_ad.headlines.extend(_text_assets(c, headlines))
+            paths.append("responsive_search_ad.headlines")
+        if descriptions is not None:
+            del ad.responsive_search_ad.descriptions[:]
+            ad.responsive_search_ad.descriptions.extend(_text_assets(c, descriptions))
+            paths.append("responsive_search_ad.descriptions")
+    except ValueError as exc:
+        return _fail(tool, cid, payload, str(exc))
+    if path1 is not None:
+        ad.responsive_search_ad.path1 = path1
+        paths.append("responsive_search_ad.path1")
+    if path2 is not None:
+        ad.responsive_search_ad.path2 = path2
+        paths.append("responsive_search_ad.path2")
+    if final_url is not None:
+        del ad.final_urls[:]
+        ad.final_urls.append(final_url)
+        paths.append("final_urls")
+    # explicit mask: repeated fields and "" clears must be named, comparison-built masks drop them
+    op.ad_operation.update_mask.paths.extend(paths)
+    return _run_mutate(tool, cid, [op], confirm, payload)
+
+
+# --------------------------------------------------------------------------- campaign final URL suffix
+@mcp.tool()
+def set_campaign_final_url_suffix(customer_id: str, campaign_id: str, final_url_suffix: str, confirm: bool = False) -> Dict[str, Any]:
+    """Set the CAMPAIGN-level final URL suffix, or clear it with "". Google appends the suffix to every
+    final URL in the campaign at click time and substitutes ValueTrack tokens, e.g.
+    "utm_term={keyword}&kw_match={matchtype}&device={device}". An ad-group or ad suffix overrides the
+    campaign's, so keep the suffix at one level. Ads, their text and history are untouched.
+    Dry run unless confirm=true.
+    """
+    cid = _cid(customer_id)
+    payload = dict(campaign_id=campaign_id, final_url_suffix=final_url_suffix)
+    tool = "set_campaign_final_url_suffix"
+    suffix = final_url_suffix or ""
+    if " " in suffix or (suffix and "=" not in suffix) or suffix.startswith(("?", "&")):
+        return _fail(tool, cid, payload, "final_url_suffix must look like key=value&key=value (no leading ? or &), or be empty")
+    c = _get_client()
+    op = c.get_type("MutateOperation")
+    camp = op.campaign_operation.update
+    camp.resource_name = c.get_service("CampaignService").campaign_path(cid, str(campaign_id))
+    camp.final_url_suffix = suffix
+    op.campaign_operation.update_mask.paths.append("final_url_suffix")   # "" must still be in the mask
+    return _run_mutate(tool, cid, [op], confirm, payload)
+
+
 # --------------------------------------------------------------------------- device bid modifiers
 # Google's fixed criterion ids for device criteria (campaignCriteria/<campaign>~<id>).
 _DEVICE_IDS = {"DESKTOP": 30000, "MOBILE": 30001, "TABLET": 30002}

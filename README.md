@@ -46,6 +46,8 @@ Works with Claude Code (and any MCP client over stdio).
 | `set_campaign_target_cpa` | Set tCPA on a Maximize-conversions campaign |
 | `set_campaign_cpc_ceiling` | Set (or remove with 0) the max-CPC ceiling on a Maximize-Clicks campaign (`target_spend.cpc_bid_ceiling_micros`) |
 | `set_final_urls` | Update final URLs (ads, assets) and final URL suffixes (ad groups, ads) in one atomic mutate — e.g. move UTMs into the final URL itself |
+| `update_responsive_search_ad` | Edit an existing RSA in place (same ad id and history; re-review, asset labels reset): replace headlines/descriptions, paths, final URL. Any argument left out is unchanged |
+| `set_campaign_final_url_suffix` | Campaign-level final URL suffix (ValueTrack, e.g. `utm_term={keyword}&kw_match={matchtype}&device={device}`), `""` clears; ad-group/ad suffixes override it |
 | `set_device_bid_modifiers` | Campaign-level device bid adjustments in percent; −100 excludes a device (mobile-only = desktop −100, tablet −100). Call it after `create_search_campaign` with the returned campaign id |
 | `set_location_bid_modifiers` | Campaign-level location bid adjustments in percent (−90 to +900) on locations the campaign already targets, keyed by geo target constant id (`{"2840": 30, "2344": -30}`); 0 removes one. Honoured by Maximize clicks / Manual CPC, ignored by Smart Bidding. Never changes targeting |
 | `remove_entity` | Permanently remove a campaign, ad group, ad, keyword, campaign criterion (e.g. a campaign negative) or an asset link (campaign/ad-group asset) — one resource name or a list of the same kind, atomically — only under a campaign carrying the managed label |
