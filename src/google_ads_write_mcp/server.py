@@ -1495,6 +1495,178 @@ def audit_log_tail(n: int = 20) -> List[Dict[str, Any]]:
     return [json.loads(l) for l in lines]
 
 
+def _ads_errors(exc: GoogleAdsException) -> List[Dict[str, str]]:
+    return [
+        {
+            "code": str(err.error_code).strip().replace("\n", " "),
+            "message": err.message,
+            "field_path": ".".join(fe.field_name for fe in err.location.field_path_elements),
+        }
+        for err in exc.failure.errors
+    ]
+
+
+@mcp.tool()
+def create_experiment(
+    customer_id: str,
+    base_campaign_id: str,
+    name: str,
+    start_date: str,
+    end_date: str,
+    traffic_split_percent: int = 50,
+    description: str = "",
+    confirm: bool = False,
+) -> Dict[str, Any]:
+    """Create a SEARCH_CUSTOM A/B experiment on an existing Search campaign.
+
+    Applied in two steps: the experiment shell, then a control arm (the base campaign)
+    and a treatment arm with traffic_split_percent of traffic. Google builds a DRAFT
+    copy of the base campaign for the treatment arm; its resource name is returned as
+    treatment_draft_campaign — edit that draft with the other tools, then call
+    schedule_experiment to start serving. Dates are YYYY-MM-DD (start must be in the
+    future). Dry run validates only the experiment shell; nothing is created."""
+    cid = _cid(customer_id)
+    tool = "create_experiment"
+    payload = dict(base_campaign_id=str(base_campaign_id), name=name, start=start_date, end=end_date,
+                   split=traffic_split_percent)
+    if not 1 <= int(traffic_split_percent) <= 99:
+        return _fail(tool, cid, payload, "traffic_split_percent must be 1..99")
+    c = _get_client()
+    exp_svc = c.get_service("ExperimentService")
+    op = c.get_type("ExperimentOperation")
+    exp = op.create
+    exp.name = name
+    exp.description = description
+    exp.suffix = "[exp]"
+    exp.type_ = c.enums.ExperimentTypeEnum.SEARCH_CUSTOM
+    exp.status = c.enums.ExperimentStatusEnum.SETUP
+    exp.start_date = start_date
+    exp.end_date = end_date
+    exp_req = c.get_type("MutateExperimentsRequest")
+    exp_req.customer_id = cid
+    exp_req.operations.append(op)
+    exp_req.validate_only = not confirm
+    try:
+        exp_resp = exp_svc.mutate_experiments(request=exp_req)
+    except GoogleAdsException as exc:
+        out = {"status": "REJECTED_BY_API", "dry_run": not confirm, "errors": _ads_errors(exc), "request_id": exc.request_id}
+        _audit(tool, cid, payload, out, applied=False)
+        return out
+    if not confirm:
+        out = {
+            "status": "VALIDATED_DRY_RUN", "dry_run": True, "operations": 1,
+            "note": "Nothing was created. The experiment shell validated; arms are only created on confirm=true "
+                    "(they need the real experiment resource). Re-run with confirm=true to apply.",
+        }
+        _audit(tool, cid, payload, out, applied=False)
+        return out
+    exp_rn = exp_resp.results[0].resource_name
+    arm_svc = c.get_service("ExperimentArmService")
+    base_rn = f"customers/{cid}/campaigns/{base_campaign_id}"
+    ops = []
+    for arm_name, is_control, split in (
+        ("control", True, 100 - int(traffic_split_percent)),
+        ("treatment", False, int(traffic_split_percent)),
+    ):
+        aop = c.get_type("ExperimentArmOperation")
+        arm = aop.create
+        arm.experiment = exp_rn
+        arm.name = arm_name
+        arm.control = is_control
+        arm.traffic_split = split
+        if is_control:
+            arm.campaigns.append(base_rn)
+        ops.append(aop)
+    arm_req = c.get_type("MutateExperimentArmsRequest")
+    arm_req.customer_id = cid
+    arm_req.operations.extend(ops)
+    arm_req.response_content_type = c.enums.ResponseContentTypeEnum.MUTABLE_RESOURCE
+    try:
+        arm_resp = arm_svc.mutate_experiment_arms(request=arm_req)
+    except GoogleAdsException as exc:
+        out = {"status": "PARTIAL_FAILURE", "experiment": exp_rn, "errors": _ads_errors(exc),
+               "request_id": exc.request_id,
+               "note": "Experiment shell was created but the arms were rejected; fix and add arms, or remove the experiment in the UI."}
+        _audit(tool, cid, payload, out, applied=True)
+        return out
+    draft = ""
+    arms = []
+    for r in arm_resp.results:
+        arms.append(r.resource_name)
+        arm_obj = getattr(r, "experiment_arm", None)
+        if arm_obj is not None and not arm_obj.control and arm_obj.in_design_campaigns:
+            draft = arm_obj.in_design_campaigns[0]
+    out = {
+        "status": "APPLIED", "dry_run": False, "operations": 1 + len(ops),
+        "experiment": exp_rn, "arms": arms, "treatment_draft_campaign": draft,
+        "note": "Edit the treatment draft campaign with the other tools, then run schedule_experiment.",
+    }
+    _audit(tool, cid, payload, out, applied=True)
+    return out
+
+
+def _experiment_lifecycle(tool: str, customer_id: str, experiment_id: str, confirm: bool) -> Dict[str, Any]:
+    """Shared body for schedule/end/promote: same dry-run, error and audit handling."""
+    cid = _cid(customer_id)
+    payload = dict(experiment_id=str(experiment_id))
+    c = _get_client()
+    svc = c.get_service("ExperimentService")
+    rn = f"customers/{cid}/experiments/{experiment_id}"
+    try:
+        if tool == "schedule_experiment":
+            req = c.get_type("ScheduleExperimentRequest")
+            req.resource_name = rn
+            req.validate_only = not confirm
+            svc.schedule_experiment(request=req)
+        elif tool == "end_experiment":
+            req = c.get_type("EndExperimentRequest")
+            req.experiment = rn
+            req.validate_only = not confirm
+            svc.end_experiment(request=req)
+        else:
+            req = c.get_type("PromoteExperimentRequest")
+            req.resource_name = rn
+            req.validate_only = not confirm
+            svc.promote_experiment(request=req)
+    except GoogleAdsException as exc:
+        out = {"status": "REJECTED_BY_API", "dry_run": not confirm, "errors": _ads_errors(exc), "request_id": exc.request_id}
+        _audit(tool, cid, payload, out, applied=False)
+        return out
+    out = {
+        "status": "APPLIED" if confirm else "VALIDATED_DRY_RUN",
+        "dry_run": not confirm,
+        "operations": 1,
+        "experiment": rn,
+    }
+    if not confirm:
+        out["note"] = "Nothing was changed. Google validated the request. Re-run with confirm=true to apply."
+    elif tool != "end_experiment":
+        out["note"] = "Accepted; Google finishes this asynchronously. Check experiment.status via the read MCP."
+    _audit(tool, cid, payload, out, applied=confirm)
+    return out
+
+
+@mcp.tool()
+def schedule_experiment(customer_id: str, experiment_id: str, confirm: bool = False) -> Dict[str, Any]:
+    """Start a SETUP experiment serving: materializes the treatment draft campaign and begins the
+    traffic split on the scheduled dates. Dry run unless confirm=true. Asynchronous on Google's side."""
+    return _experiment_lifecycle("schedule_experiment", customer_id, experiment_id, confirm)
+
+
+@mcp.tool()
+def end_experiment(customer_id: str, experiment_id: str, confirm: bool = False) -> Dict[str, Any]:
+    """End a running experiment: the treatment arm stops serving and the base campaign resumes full
+    traffic. Dry run unless confirm=true."""
+    return _experiment_lifecycle("end_experiment", customer_id, experiment_id, confirm)
+
+
+@mcp.tool()
+def promote_experiment(customer_id: str, experiment_id: str, confirm: bool = False) -> Dict[str, Any]:
+    """Promote a running experiment: the treatment settings replace the base campaign (the winner
+    becomes the live campaign). Dry run unless confirm=true. Asynchronous on Google's side."""
+    return _experiment_lifecycle("promote_experiment", customer_id, experiment_id, confirm)
+
+
 def main() -> None:
     """Console entrypoint. Modes:
       google-ads-write-mcp                      run the MCP server on stdio

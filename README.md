@@ -53,6 +53,10 @@ Works with Claude Code (and any MCP client over stdio).
 | `remove_entity` | Permanently remove a campaign, ad group, ad, keyword, campaign criterion (e.g. a campaign negative) or an asset link (campaign/ad-group asset) — one resource name or a list of the same kind, atomically — only under a campaign carrying the managed label |
 | `keyword_ideas` | Keyword Planner ideas with monthly volume and bid ranges (read-only, 1 request/second) |
 | `audit_log_tail` | Last N audit-log entries |
+| `create_experiment` | SEARCH_CUSTOM A/B experiment on an existing Search campaign: experiment shell plus control/treatment arms with a traffic split; returns the treatment's draft campaign to edit with the other tools. Dry run validates the shell only — arms need the real experiment, so they are created on confirm |
+| `schedule_experiment` | Start a SETUP experiment serving (materializes the treatment draft; asynchronous on Google's side) |
+| `end_experiment` | End a running experiment; the base campaign resumes full traffic |
+| `promote_experiment` | Apply the treatment to the base campaign — the winner becomes the live campaign (asynchronous) |
 
 Customer ids may contain dashes. Use the read-only MCP first to look up
 campaign and ad-group ids and resource names.
