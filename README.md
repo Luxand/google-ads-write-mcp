@@ -39,7 +39,8 @@ Works with Claude Code (and any MCP client over stdio).
 | `add_keywords` | Add positive keywords to an ad group |
 | `add_negative_keywords` | Add negatives at campaign or ad-group level |
 | `add_sitelinks` / `add_callouts` / `add_structured_snippet` | Create the assets and attach them to a campaign; `add_sitelinks` can attach to one ad group instead (`ad_group_id`) |
-| `add_image_assets` | Upload PNG/JPEG files and attach them to a Search campaign (`AD_IMAGE`); validates 1:1 / 1.91:1 shape, minimum size and 5 MB cap |
+| `set_campaign_conversion_goals` | Campaign-specific conversion goals: toggle `biddable` per (category, origin) pair — e.g. bid only on PURCHASE/WEBSITE by setting it true and every other account goal false; one atomic request |
+| `add_image_assets` | Upload PNG/JPEG files and attach them to a Search campaign (`AD_IMAGE`) — or to one ad group via `ad_group_id` (up to 20 images per campaign and per ad group); validates 1:1 / 1.91:1 shape, minimum size and 5 MB cap |
 | `add_business_assets` | Attach a business name (TEXT asset, `BUSINESS_NAME`) and/or business logo (`BUSINESS_LOGO`, square >=128x128, uploaded or re-linked by asset resource name) to a Search campaign |
 | `set_status` | ENABLED / PAUSED on a campaign, ad group, ad or keyword |
 | `set_campaign_daily_budget` | Change a campaign's non-shared daily budget |

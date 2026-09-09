@@ -890,9 +890,14 @@ def add_image_assets(
     customer_id: str,
     campaign_id: str,
     images: List[Dict[str, str]],
+    ad_group_id: Optional[str] = None,
     confirm: bool = False,
 ) -> Dict[str, Any]:
     """Upload image files as image assets and attach them to a Search campaign as AD_IMAGE.
+
+    With ad_group_id the images are linked to that AD GROUP instead of the campaign
+    (campaign_id is still required for context/audit; Google allows up to 20 images per
+    campaign and per ad group, and ad-group links override campaign links when serving).
 
     images: [{"path": "/absolute/file.png", "field_type": "SQUARE_MARKETING_IMAGE"|"MARKETING_IMAGE",
               "name": optional asset name}, ...]
@@ -906,11 +911,12 @@ def add_image_assets(
     """
     cid = _cid(customer_id)
     tool = "add_image_assets"
-    payload: Dict[str, Any] = dict(campaign_id=campaign_id, images=[])
+    payload: Dict[str, Any] = dict(campaign_id=campaign_id, ad_group_id=ad_group_id, images=[])
     if not images:
         return _fail(tool, cid, payload, "no images given")
     c = _get_client()
     camp_rn = c.get_service("CampaignService").campaign_path(cid, str(campaign_id))
+    ag_rn = f"customers/{cid}/adGroups/{ad_group_id}" if ad_group_id else None
     ops = []
     for i, im in enumerate(images, start=1):
         ft = (im.get("field_type") or "").upper()
@@ -948,10 +954,16 @@ def add_image_assets(
             ops.append(op)
             payload["images"].append({"path": path, "bytes": len(data), "dims": f"{w}x{h}", "field_type": ft})
         link = c.get_type("MutateOperation")
-        ca = link.campaign_asset_operation.create
-        ca.campaign = camp_rn
-        ca.asset = asset_rn
-        ca.field_type = c.enums.AssetFieldTypeEnum.AD_IMAGE
+        if ag_rn:
+            aga = link.ad_group_asset_operation.create
+            aga.ad_group = ag_rn
+            aga.asset = asset_rn
+            aga.field_type = c.enums.AssetFieldTypeEnum.AD_IMAGE
+        else:
+            ca = link.campaign_asset_operation.create
+            ca.campaign = camp_rn
+            ca.asset = asset_rn
+            ca.field_type = c.enums.AssetFieldTypeEnum.AD_IMAGE
         ops.append(link)
     return _run_mutate(tool, cid, ops, confirm, payload)
 
@@ -1493,6 +1505,51 @@ def audit_log_tail(n: int = 20) -> List[Dict[str, Any]]:
     with open(AUDIT_LOG, encoding="utf-8") as fh:
         lines = fh.readlines()[-max(1, min(n, 200)):]
     return [json.loads(l) for l in lines]
+
+
+@mcp.tool()
+def set_campaign_conversion_goals(
+    customer_id: str,
+    campaign_id: str,
+    goals: List[Dict[str, Any]],
+    confirm: bool = False,
+) -> Dict[str, Any]:
+    """Set campaign-specific conversion goals by toggling the biddable flag per goal.
+
+    goals: [{"category": "PURCHASE", "origin": "WEBSITE", "biddable": true}, ...] -
+    category is a ConversionActionCategory (PURCHASE, SIGNUP, SUBMIT_LEAD_FORM, ...),
+    origin a ConversionOrigin (WEBSITE, APP, ...). Toggling any goal switches the
+    campaign from account-default goals to campaign-specific goals, so to bid only on
+    purchases pass PURCHASE/WEBSITE biddable=true AND every other goal the account has
+    as biddable=false (list them via the read MCP: SELECT campaign_conversion_goal.category,
+    campaign_conversion_goal.origin, campaign_conversion_goal.biddable FROM
+    campaign_conversion_goal WHERE campaign.id = <id>). One atomic request; dry run
+    unless confirm=true."""
+    cid = _cid(customer_id)
+    tool = "set_campaign_conversion_goals"
+    payload = dict(campaign_id=str(campaign_id), goals=goals)
+    if not goals:
+        return _fail(tool, cid, payload, "no goals given")
+    c = _get_client()
+    ops = []
+    for g in goals:
+        cat = str(g.get("category", "")).upper()
+        origin = str(g.get("origin", "")).upper()
+        if cat not in c.enums.ConversionActionCategoryEnum.ConversionActionCategory.__members__:
+            return _fail(tool, cid, payload, f"unknown category {cat!r}")
+        if origin not in c.enums.ConversionOriginEnum.ConversionOrigin.__members__:
+            return _fail(tool, cid, payload, f"unknown origin {origin!r}")
+        if "biddable" not in g:
+            return _fail(tool, cid, payload, "each goal needs a boolean 'biddable'")
+        op = c.get_type("MutateOperation")
+        goal = op.campaign_conversion_goal_operation.update
+        goal.resource_name = f"customers/{cid}/campaignConversionGoals/{campaign_id}~{cat}~{origin}"
+        goal.biddable = bool(g["biddable"])
+        # Explicit mask: proto3 drops False from generated masks (same pitfall as
+        # device modifier 0.0), which would silently skip biddable=false updates.
+        op.campaign_conversion_goal_operation.update_mask.paths.append("biddable")
+        ops.append(op)
+    return _run_mutate(tool, cid, ops, confirm, payload)
 
 
 def _ads_errors(exc: GoogleAdsException) -> List[Dict[str, str]]:
