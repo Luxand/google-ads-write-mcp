@@ -1628,9 +1628,10 @@ def set_campaign_conversion_goals(
     for g in goals:
         cat = str(g.get("category", "")).upper()
         origin = str(g.get("origin", "")).upper()
-        if cat not in c.enums.ConversionActionCategoryEnum.ConversionActionCategory.__members__:
+        # client.enums.<X>Enum is already the inner enum class (same pattern as set_status).
+        if cat not in c.enums.ConversionActionCategoryEnum.__members__:
             return _fail(tool, cid, payload, f"unknown category {cat!r}")
-        if origin not in c.enums.ConversionOriginEnum.ConversionOrigin.__members__:
+        if origin not in c.enums.ConversionOriginEnum.__members__:
             return _fail(tool, cid, payload, f"unknown origin {origin!r}")
         if "biddable" not in g:
             return _fail(tool, cid, payload, "each goal needs a boolean 'biddable'")
