@@ -1507,6 +1507,99 @@ def audit_log_tail(n: int = 20) -> List[Dict[str, Any]]:
     return [json.loads(l) for l in lines]
 
 
+def _fetch_image_url(url: str) -> Union[bytes, str]:
+    """Fetch an https image with SSRF guards. Returns bytes, or an error string."""
+    import ipaddress
+    import socket
+    import urllib.parse
+    import urllib.request
+
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https":
+        return "image_url must be https"
+    host = parsed.hostname or ""
+    try:
+        infos = socket.getaddrinfo(host, parsed.port or 443, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as exc:
+        return f"cannot resolve {host}: {exc}"
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            return f"{host} resolves to a non-public address; refusing to fetch"
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):  # noqa: ANN002, ANN003
+            return None
+
+    opener = urllib.request.build_opener(_NoRedirect)
+    req = urllib.request.Request(url, headers={"User-Agent": "google-ads-write-mcp"})
+    try:
+        with opener.open(req, timeout=20) as resp:
+            data = resp.read(_MAX_IMAGE_BYTES + 1)
+    except Exception as exc:  # includes HTTPError for redirects (disabled)
+        return f"fetch failed: {exc}"
+    if len(data) > _MAX_IMAGE_BYTES:
+        return f"image exceeds 5 MB"
+    return data
+
+
+@mcp.tool()
+def upload_image_asset(
+    customer_id: str,
+    name: str,
+    image_url: Optional[str] = None,
+    image_base64: Optional[str] = None,
+    confirm: bool = False,
+) -> Dict[str, Any]:
+    """Upload one image into the account's asset library as an IMAGE asset (no campaign link).
+
+    Pass exactly one source: image_url (https only; public hosts only, redirects refused,
+    5 MB cap) - the right choice for anything over ~100 KB - or image_base64 (standard
+    base64, no data: prefix; practical only for small files, since the encoded content
+    travels inside the tool call). PNG or JPEG. Returns the asset resource name and
+    detected dimensions; link it afterwards with add_image_assets via
+    asset_resource_name (campaign level or ad_group_id). Google rejects bytes identical
+    to an existing asset with DUPLICATE_ASSET - reuse that asset's resource name instead.
+    Dry run unless confirm=true."""
+    import base64
+    import hashlib
+
+    cid = _cid(customer_id)
+    tool = "upload_image_asset"
+    payload: Dict[str, Any] = dict(name=name, source="url" if image_url else "base64")
+    if bool(image_url) == bool(image_base64):
+        return _fail(tool, cid, payload, "pass exactly one of image_url or image_base64")
+    if image_url:
+        payload["image_url"] = image_url
+        data = _fetch_image_url(image_url)
+        if isinstance(data, str):
+            return _fail(tool, cid, payload, data)
+    else:
+        try:
+            data = base64.b64decode(image_base64, validate=True)
+        except Exception as exc:
+            return _fail(tool, cid, payload, f"invalid base64: {exc}")
+        if len(data) > _MAX_IMAGE_BYTES:
+            return _fail(tool, cid, payload, "image exceeds 5 MB")
+    dims = _image_dims(data)
+    if not dims:
+        return _fail(tool, cid, payload, "not a readable PNG/JPEG image")
+    payload["bytes"] = len(data)
+    payload["sha256"] = hashlib.sha256(data).hexdigest()
+    payload["dims"] = f"{dims[0]}x{dims[1]}"
+    c = _get_client()
+    op = c.get_type("MutateOperation")
+    asset = op.asset_operation.create
+    asset.name = name
+    asset.type_ = c.enums.AssetTypeEnum.IMAGE
+    asset.image_asset.data = data
+    out = _run_mutate(tool, cid, [op], confirm, payload)
+    out["bytes"] = len(data)
+    out["dims"] = payload["dims"]
+    out["sha256"] = payload["sha256"]
+    return out
+
+
 @mcp.tool()
 def set_campaign_conversion_goals(
     customer_id: str,
