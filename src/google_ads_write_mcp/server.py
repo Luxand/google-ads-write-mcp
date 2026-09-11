@@ -1471,7 +1471,7 @@ def _audience_ops(c: GoogleAdsClient, cid: str, campaign_id: str, user_interest_
         op = c.get_type("MutateOperation")
         crit = op.campaign_criterion_operation.create
         crit.campaign = upd.resource_name
-        crit.user_interest.user_interest_category = c.get_service("UserInterestService").user_interest_path(cid, uid)
+        crit.user_interest.user_interest_category = f"customers/{cid}/userInterests/{uid}"
         if bid_modifier_pct is not None:
             crit.bid_modifier = round(1 + float(bid_modifier_pct) / 100.0, 2)
         ops.append(op)
