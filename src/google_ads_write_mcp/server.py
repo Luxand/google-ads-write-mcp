@@ -1411,6 +1411,112 @@ def set_location_bid_modifiers(
     return _run_mutate(tool, cid, ops, confirm, payload)
 
 
+def _audience_ops(c: GoogleAdsClient, cid: str, campaign_id: str, user_interest_ids: List[Union[str, int]],
+                  bid_modifier_pct: Optional[float]):
+    """Observation-mode audiences on a Search campaign: (1) the campaign's targeting setting gets
+    AUDIENCE -> bid_only=true (Google's "Observation"), so the segments never narrow who sees the ads;
+    other dimensions already in target_restrictions are preserved; (2) one campaign_criterion per
+    user_interest id (in-market / affinity, customers/<cid>/userInterests/<id>), optionally with a
+    bid adjustment (-90..+900 percent; None = no adjustment, pure reporting). Segments the campaign
+    already carries are skipped rather than duplicated."""
+    ga = c.get_service("GoogleAdsService")
+    q = (
+        "SELECT campaign.id, campaign.advertising_channel_type, "
+        "campaign.targeting_setting.target_restrictions FROM campaign "
+        f"WHERE campaign.id = {int(campaign_id)}"
+    )
+    rows = list(ga.search(customer_id=cid, query=q))
+    if not rows:
+        raise ValueError(f"campaign {campaign_id} not found")
+    camp = rows[0].campaign
+    if camp.advertising_channel_type != c.enums.AdvertisingChannelTypeEnum.SEARCH:
+        raise ValueError(f"campaign {campaign_id} is not a Search campaign")
+    q2 = (
+        "SELECT campaign_criterion.user_interest.user_interest_category FROM campaign_criterion "
+        f"WHERE campaign.id = {int(campaign_id)} AND campaign_criterion.type = USER_INTEREST "
+        "AND campaign_criterion.negative = FALSE"
+    )
+    present = {str(r.campaign_criterion.user_interest.user_interest_category).rsplit("/", 1)[-1]
+               for r in ga.search(customer_id=cid, query=q2)}
+    if bid_modifier_pct is not None and not (-90 <= float(bid_modifier_pct) <= 900):
+        raise ValueError("bid_modifier_pct must be between -90 and +900 percent")
+    ops = []
+    # (1) targeting setting: AUDIENCE dimension in observation (bid_only) mode.
+    op = c.get_type("MutateOperation")
+    upd = op.campaign_operation.update
+    upd.resource_name = c.get_service("CampaignService").campaign_path(cid, campaign_id)
+    aud_dim = c.enums.TargetingDimensionEnum.AUDIENCE
+    kept = False
+    for tr in camp.targeting_setting.target_restrictions:
+        r = c.get_type("TargetRestriction")
+        r.targeting_dimension = tr.targeting_dimension
+        r.bid_only = True if tr.targeting_dimension == aud_dim else tr.bid_only
+        kept = kept or tr.targeting_dimension == aud_dim
+        upd.targeting_setting.target_restrictions.append(r)
+    if not kept:
+        r = c.get_type("TargetRestriction")
+        r.targeting_dimension = aud_dim
+        r.bid_only = True
+        upd.targeting_setting.target_restrictions.append(r)
+    op.campaign_operation.update_mask.paths.append("targeting_setting.target_restrictions")
+    ops.append(op)
+    # (2) one criterion per new segment.
+    added: List[str] = []
+    for raw in user_interest_ids:
+        uid = str(raw).strip().rsplit("/", 1)[-1]
+        if not uid.isdigit():
+            raise ValueError(f"{raw!r}: use a user interest id such as 80276 or customers/<cid>/userInterests/80276")
+        if uid in present or uid in added:
+            continue
+        op = c.get_type("MutateOperation")
+        crit = op.campaign_criterion_operation.create
+        crit.campaign = upd.resource_name
+        crit.user_interest.user_interest_category = c.get_service("UserInterestService").user_interest_path(cid, uid)
+        if bid_modifier_pct is not None:
+            crit.bid_modifier = round(1 + float(bid_modifier_pct) / 100.0, 2)
+        ops.append(op)
+        added.append(uid)
+    return ops, added, sorted(present)
+
+
+@mcp.tool()
+def add_campaign_audiences(
+    customer_id: str,
+    campaign_id: str,
+    user_interest_ids: List[Union[str, int]],
+    bid_modifier_pct: Optional[float] = None,
+    confirm: bool = False,
+) -> Dict[str, Any]:
+    """Attach in-market / affinity segments to a Search campaign in OBSERVATION mode: the campaign's
+    AUDIENCE targeting dimension is set to bid_only (Google's "Observation"), so nothing narrows who
+    sees the ads; the segments only become reporting rows (and, with bid_modifier_pct, a bid
+    adjustment from -90 to +900 percent applied to every segment in this call). user_interest_ids:
+    ids from the read MCP, e.g. SELECT user_interest.user_interest_id, user_interest.name FROM
+    user_interest WHERE user_interest.taxonomy_type = 'IN_MARKET' AND user_interest.name LIKE
+    '%Software%' (80276 = In-market Software, 80279 = Business & Productivity Software, 80530 =
+    Enterprise Software). Segments already on the campaign are skipped. Targeting mode is never
+    set by this tool. One atomic mutate; dry run unless confirm=true."""
+    cid = _cid(customer_id)
+    payload = dict(campaign_id=campaign_id, user_interest_ids=user_interest_ids, bid_modifier_pct=bid_modifier_pct)
+    tool = "add_campaign_audiences"
+    if not user_interest_ids:
+        return _fail(tool, cid, payload, "no user_interest_ids given")
+    c = _get_client()
+    try:
+        ops, added, present = _audience_ops(c, cid, campaign_id, user_interest_ids, bid_modifier_pct)
+    except ValueError as exc:
+        return _fail(tool, cid, payload, str(exc))
+    except GoogleAdsException as exc:
+        return _fail(tool, cid, payload, f"could not read the campaign: {exc.failure.errors[0].message if exc.failure.errors else exc}")
+    if not added:
+        return _fail(tool, cid, payload, f"every requested segment is already on the campaign (present: {', '.join(present) or 'none'})")
+    out = _run_mutate(tool, cid, ops, confirm, payload)
+    out["segments_added"] = added
+    out["segments_already_present"] = present
+    out["mode"] = "OBSERVATION (bid_only)"
+    return out
+
+
 # --------------------------------------------------------------------------- keyword planner (read-only)
 _KP_MIN_INTERVAL = 1.1          # GenerateKeywordIdeas is capped at 1 request/second per customer id
 _kp_last_call = [0.0]
