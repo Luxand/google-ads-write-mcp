@@ -547,6 +547,223 @@ def set_campaign_daily_budget(customer_id: str, campaign_id: str, daily_budget: 
     return _run_mutate(tool, cid, [op], confirm, payload)
 
 
+# ---------------------------------------------------------------------------
+# Portfolio bidding strategies and shared budgets
+# ---------------------------------------------------------------------------
+
+def _campaign_ids(campaign_ids: Optional[List[Union[str, int]]]) -> List[str]:
+    return [str(x).strip() for x in (campaign_ids or []) if str(x).strip()]
+
+
+def _strategy_kind(c: GoogleAdsClient, cid: str, bidding_strategy_id: str) -> Optional[str]:
+    """Return 'MAXIMIZE_CONVERSIONS' | 'TARGET_CPA' | other type name, or None if not found."""
+    ga = c.get_service("GoogleAdsService")
+    q = ("SELECT bidding_strategy.id, bidding_strategy.type, bidding_strategy.status "
+         f"FROM bidding_strategy WHERE bidding_strategy.id = {int(bidding_strategy_id)}")
+    rows = list(ga.search(customer_id=cid, query=q))
+    if not rows:
+        return None
+    return rows[0].bidding_strategy.type_.name
+
+
+@mcp.tool()
+def create_portfolio_bidding_strategy(
+    customer_id: str,
+    name: str,
+    target_cpa: Optional[float] = None,
+    campaign_ids: Optional[List[Union[str, int]]] = None,
+    confirm: bool = False,
+) -> Dict[str, Any]:
+    """Create a portfolio (account-level, shared) Maximize Conversions bid strategy, optionally with a
+    target CPA (account currency, e.g. 250), and attach the given campaigns to it in the same atomic
+    request. Campaigns switch from their own campaign-level strategy to the portfolio; their budgets are
+    untouched (use create_shared_budget to pool spend as well). Omit target_cpa for a pure Maximize
+    Conversions portfolio. Dry run unless confirm=true."""
+    cid = _cid(customer_id)
+    ids = _campaign_ids(campaign_ids)
+    payload = dict(name=name, target_cpa=target_cpa, campaign_ids=ids)
+    tool = "create_portfolio_bidding_strategy"
+    if not name or not name.strip() or len(name) > 255:
+        return _fail(tool, cid, payload, "name must be 1-255 characters")
+    if target_cpa is not None and not (0 < target_cpa < 10000):
+        return _fail(tool, cid, payload, "target_cpa out of range")
+    if len(ids) != len(set(ids)):
+        return _fail(tool, cid, payload, "duplicate campaign ids")
+    c = _get_client()
+    temp_rn = f"customers/{cid}/biddingStrategies/-1"
+    ops = []
+    op = c.get_type("MutateOperation")
+    bs = op.bidding_strategy_operation.create
+    bs.resource_name = temp_rn
+    bs.name = name.strip()
+    bs.maximize_conversions = c.get_type("MaximizeConversions")
+    if target_cpa is not None:
+        bs.maximize_conversions.target_cpa_micros = int(round(target_cpa * 1_000_000))
+    ops.append(op)
+    camp_svc = c.get_service("CampaignService")
+    for campaign_id in ids:
+        cop = c.get_type("MutateOperation")
+        camp = cop.campaign_operation.update
+        camp.resource_name = camp_svc.campaign_path(cid, campaign_id)
+        camp.bidding_strategy = temp_rn
+        cop.campaign_operation.update_mask.paths.append("bidding_strategy")
+        ops.append(cop)
+    return _run_mutate(tool, cid, ops, confirm, payload)
+
+
+@mcp.tool()
+def set_campaign_bidding_strategy(
+    customer_id: str,
+    campaign_ids: List[Union[str, int]],
+    bidding_strategy_id: Optional[str] = None,
+    confirm: bool = False,
+) -> Dict[str, Any]:
+    """Attach campaigns to an existing portfolio bid strategy (bidding_strategy_id), or detach them
+    back to campaign-level Maximize Conversions without a target when bidding_strategy_id is omitted.
+    One atomic request. Dry run unless confirm=true."""
+    cid = _cid(customer_id)
+    ids = _campaign_ids(campaign_ids)
+    payload = dict(campaign_ids=ids, bidding_strategy_id=bidding_strategy_id)
+    tool = "set_campaign_bidding_strategy"
+    if not ids:
+        return _fail(tool, cid, payload, "no campaign ids given")
+    if len(ids) != len(set(ids)):
+        return _fail(tool, cid, payload, "duplicate campaign ids")
+    c = _get_client()
+    strategy_rn = None
+    if bidding_strategy_id:
+        kind = _strategy_kind(c, cid, str(bidding_strategy_id))
+        if kind is None:
+            return _fail(tool, cid, payload, "bidding strategy not found in this account")
+        payload["bidding_strategy_type"] = kind
+        strategy_rn = f"customers/{cid}/biddingStrategies/{int(bidding_strategy_id)}"
+    camp_svc = c.get_service("CampaignService")
+    ops = []
+    for campaign_id in ids:
+        op = c.get_type("MutateOperation")
+        camp = op.campaign_operation.update
+        camp.resource_name = camp_svc.campaign_path(cid, campaign_id)
+        if strategy_rn:
+            camp.bidding_strategy = strategy_rn
+            op.campaign_operation.update_mask.paths.append("bidding_strategy")
+        else:
+            # Setting the oneof member to an empty message selects campaign-level
+            # Maximize Conversions; the explicit mask is needed because the empty
+            # message has no set fields for a generated mask to find.
+            camp.maximize_conversions = c.get_type("MaximizeConversions")
+            op.campaign_operation.update_mask.paths.append("maximize_conversions")
+        ops.append(op)
+    return _run_mutate(tool, cid, ops, confirm, payload)
+
+
+@mcp.tool()
+def set_bidding_strategy_target_cpa(
+    customer_id: str,
+    bidding_strategy_id: str,
+    target_cpa: float,
+    confirm: bool = False,
+) -> Dict[str, Any]:
+    """Change the target CPA (account currency) of a portfolio bid strategy - Maximize Conversions
+    (maximize_conversions.target_cpa_micros) or legacy Target CPA (target_cpa.target_cpa_micros).
+    Pass 0 on a Maximize Conversions portfolio to remove the target. Dry run unless confirm=true."""
+    cid = _cid(customer_id)
+    payload = dict(bidding_strategy_id=str(bidding_strategy_id), target_cpa=target_cpa)
+    tool = "set_bidding_strategy_target_cpa"
+    if not (0 <= target_cpa < 10000):
+        return _fail(tool, cid, payload, "target_cpa out of range")
+    c = _get_client()
+    kind = _strategy_kind(c, cid, str(bidding_strategy_id))
+    if kind is None:
+        return _fail(tool, cid, payload, "bidding strategy not found in this account")
+    payload["bidding_strategy_type"] = kind
+    op = c.get_type("MutateOperation")
+    bs = op.bidding_strategy_operation.update
+    bs.resource_name = f"customers/{cid}/biddingStrategies/{int(bidding_strategy_id)}"
+    micros = int(round(target_cpa * 1_000_000))
+    if kind == "MAXIMIZE_CONVERSIONS":
+        bs.maximize_conversions.target_cpa_micros = micros
+        op.bidding_strategy_operation.update_mask.paths.append("maximize_conversions.target_cpa_micros")
+    elif kind == "TARGET_CPA":
+        if micros == 0:
+            return _fail(tool, cid, payload, "a legacy Target CPA strategy needs a positive target")
+        bs.target_cpa.target_cpa_micros = micros
+        op.bidding_strategy_operation.update_mask.paths.append("target_cpa.target_cpa_micros")
+    else:
+        return _fail(tool, cid, payload, f"strategy type {kind} has no target CPA")
+    return _run_mutate(tool, cid, [op], confirm, payload)
+
+
+@mcp.tool()
+def create_shared_budget(
+    customer_id: str,
+    name: str,
+    daily_budget: float,
+    campaign_ids: Optional[List[Union[str, int]]] = None,
+    confirm: bool = False,
+) -> Dict[str, Any]:
+    """Create an explicitly shared daily budget (account currency) and move the given campaigns onto it
+    in the same atomic request, so spend can flow between them (pair with a portfolio bid strategy).
+    Each campaign's previous individual budget is left in place, unused. Dry run unless confirm=true."""
+    cid = _cid(customer_id)
+    ids = _campaign_ids(campaign_ids)
+    payload = dict(name=name, daily_budget=daily_budget, campaign_ids=ids)
+    tool = "create_shared_budget"
+    if not name or not name.strip() or len(name) > 255:
+        return _fail(tool, cid, payload, "name must be 1-255 characters")
+    if not (0 < daily_budget < 1_000_000):
+        return _fail(tool, cid, payload, "daily_budget out of range")
+    if len(ids) != len(set(ids)):
+        return _fail(tool, cid, payload, "duplicate campaign ids")
+    c = _get_client()
+    temp_rn = f"customers/{cid}/campaignBudgets/-1"
+    ops = []
+    op = c.get_type("MutateOperation")
+    b = op.campaign_budget_operation.create
+    b.resource_name = temp_rn
+    b.name = name.strip()
+    b.amount_micros = int(round(daily_budget * 1_000_000))
+    b.explicitly_shared = True
+    b.delivery_method = c.enums.BudgetDeliveryMethodEnum.STANDARD
+    ops.append(op)
+    camp_svc = c.get_service("CampaignService")
+    for campaign_id in ids:
+        cop = c.get_type("MutateOperation")
+        camp = cop.campaign_operation.update
+        camp.resource_name = camp_svc.campaign_path(cid, campaign_id)
+        camp.campaign_budget = temp_rn
+        cop.campaign_operation.update_mask.paths.append("campaign_budget")
+        ops.append(cop)
+    return _run_mutate(tool, cid, ops, confirm, payload)
+
+
+@mcp.tool()
+def set_shared_budget_amount(customer_id: str, budget_id: str, daily_budget: float, confirm: bool = False) -> Dict[str, Any]:
+    """Change the daily amount (account currency) of an explicitly shared budget. Refuses non-shared
+    budgets (use set_campaign_daily_budget for those). Dry run unless confirm=true."""
+    cid = _cid(customer_id)
+    payload = dict(budget_id=str(budget_id), daily_budget=daily_budget)
+    tool = "set_shared_budget_amount"
+    if not (0 < daily_budget < 1_000_000):
+        return _fail(tool, cid, payload, "daily_budget out of range")
+    c = _get_client()
+    ga = c.get_service("GoogleAdsService")
+    q = ("SELECT campaign_budget.id, campaign_budget.explicitly_shared, campaign_budget.amount_micros, "
+         f"campaign_budget.reference_count FROM campaign_budget WHERE campaign_budget.id = {int(budget_id)}")
+    rows = list(ga.search(customer_id=cid, query=q))
+    if not rows:
+        return _fail(tool, cid, payload, "budget not found")
+    row = rows[0]
+    if not row.campaign_budget.explicitly_shared:
+        return _fail(tool, cid, payload, "budget is not shared; use set_campaign_daily_budget")
+    payload["previous_daily_budget"] = row.campaign_budget.amount_micros / 1e6
+    payload["campaigns_using_budget"] = row.campaign_budget.reference_count
+    op = c.get_type("MutateOperation")
+    b = op.campaign_budget_operation.update
+    b.resource_name = f"customers/{cid}/campaignBudgets/{int(budget_id)}"
+    b.amount_micros = int(round(daily_budget * 1_000_000))
+    op.campaign_budget_operation.update_mask.paths.append("amount_micros")
+    return _run_mutate(tool, cid, [op], confirm, payload)
+
 
 def _managed_label_rn(c: GoogleAdsClient, cid: str) -> Optional[str]:
     """Resource name of the managed label in this account, or None if it does not exist yet."""

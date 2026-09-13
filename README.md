@@ -46,6 +46,11 @@ Works with Claude Code (and any MCP client over stdio).
 | `set_status` | ENABLED / PAUSED on a campaign, ad group, ad or keyword |
 | `set_campaign_daily_budget` | Change a campaign's non-shared daily budget |
 | `set_campaign_target_cpa` | Set tCPA on a Maximize-conversions campaign |
+| `create_portfolio_bidding_strategy` | Create a portfolio (shared) Maximize Conversions bid strategy, optionally with a target CPA, and attach campaigns to it in the same atomic request — pools Smart Bidding's learning across campaigns |
+| `set_campaign_bidding_strategy` | Attach campaigns to an existing portfolio bid strategy, or (no `bidding_strategy_id`) detach them back to campaign-level Maximize Conversions without a target |
+| `set_bidding_strategy_target_cpa` | Change (or remove with 0) the target CPA of a portfolio strategy — Maximize Conversions or legacy Target CPA |
+| `create_shared_budget` | Create an explicitly shared daily budget and move campaigns onto it atomically, so spend flows between them; old individual budgets are left unused |
+| `set_shared_budget_amount` | Change the daily amount of an explicitly shared budget (`set_campaign_daily_budget` refuses those) |
 | `set_campaign_cpc_ceiling` | Set (or remove with 0) the max-CPC ceiling on a Maximize-Clicks campaign (`target_spend.cpc_bid_ceiling_micros`) |
 | `set_final_urls` | Update final URLs (ads, assets) and final URL suffixes (ad groups, ads) in one atomic mutate — e.g. move UTMs into the final URL itself |
 | `update_responsive_search_ad` | Edit an existing RSA in place (same ad id and history; re-review, asset labels reset): replace headlines/descriptions, paths, final URL. Any argument left out is unchanged |
@@ -151,6 +156,11 @@ to the JSON to apply.
   `campaignCriteria/<campaign>~<id>`. Name `bid_modifier` in the update mask
   explicitly: a field mask built by comparing against defaults drops a 0.0
   (−100%) value and the request succeeds while changing nothing.
+
+- Setting a campaign back to campaign-level Maximize Conversions means assigning
+  an *empty* `MaximizeConversions` message to the `campaign_bidding_strategy`
+  oneof and naming `maximize_conversions` in the update mask explicitly; a
+  generated mask sees no set fields and sends nothing.
 
 ## License
 
