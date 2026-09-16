@@ -1969,6 +1969,108 @@ def set_campaign_conversion_goals(
     return _run_mutate(tool, cid, ops, confirm, payload)
 
 
+@mcp.tool()
+def set_campaign_custom_conversion_goal(
+    customer_id: str,
+    campaign_id: str,
+    custom_conversion_goal_id: str = "",
+    confirm: bool = False,
+) -> Dict[str, Any]:
+    """Point a campaign at one custom conversion goal (an explicit set of conversion
+    actions), or send it back to the account-default goals.
+
+    custom_conversion_goal_id: the numeric id of an existing custom goal (list them via
+    the read MCP: SELECT custom_conversion_goal.id, custom_conversion_goal.name,
+    custom_conversion_goal.conversion_actions FROM custom_conversion_goal). Pass "" to
+    restore account-default goals. This is the action-level counterpart of
+    set_campaign_conversion_goals, which only toggles goal categories; custom goals
+    ignore each action's primary/secondary flag, so the campaign bids on exactly the
+    listed actions and nothing else. Updates conversionGoalCampaignConfigs/<campaign>.
+    Dry run unless confirm=true."""
+    cid = _cid(customer_id)
+    tool = "set_campaign_custom_conversion_goal"
+    goal_id = str(custom_conversion_goal_id or "").strip()
+    payload = dict(campaign_id=str(campaign_id), custom_conversion_goal_id=goal_id)
+    if goal_id and not goal_id.isdigit():
+        return _fail(tool, cid, payload, "custom_conversion_goal_id must be a numeric id or empty")
+    c = _get_client()
+    svc = c.get_service("ConversionGoalCampaignConfigService")
+    op = c.get_type("MutateOperation")
+    cfg = op.conversion_goal_campaign_config_operation.update
+    cfg.resource_name = svc.conversion_goal_campaign_config_path(cid, str(campaign_id))
+    level = c.enums.GoalConfigLevelEnum
+    mask = op.conversion_goal_campaign_config_operation.update_mask.paths
+    if goal_id:
+        cfg.goal_config_level = level.CAMPAIGN
+        cfg.custom_conversion_goal = svc.custom_conversion_goal_path(cid, goal_id)
+        mask.extend(["goal_config_level", "custom_conversion_goal"])
+    else:
+        cfg.goal_config_level = level.CUSTOMER
+        mask.append("goal_config_level")
+    return _run_mutate(tool, cid, [op], confirm, payload)
+
+
+@mcp.tool()
+def create_custom_conversion_goal(
+    customer_id: str,
+    name: str,
+    conversion_action_ids: List[Union[str, int]],
+    confirm: bool = False,
+) -> Dict[str, Any]:
+    """Create an ENABLED custom conversion goal: a named set of conversion actions that
+    campaigns can bid on via set_campaign_custom_conversion_goal. conversion_action_ids
+    are numeric ids (read MCP: SELECT conversion_action.id, conversion_action.name FROM
+    conversion_action WHERE conversion_action.status = 'ENABLED'). Names must be unique
+    in the account. Dry run unless confirm=true."""
+    cid = _cid(customer_id)
+    tool = "create_custom_conversion_goal"
+    ids = [str(i).strip() for i in (conversion_action_ids or [])]
+    payload = dict(name=name, conversion_action_ids=ids)
+    if not name or not name.strip():
+        return _fail(tool, cid, payload, "name is empty")
+    if not ids:
+        return _fail(tool, cid, payload, "no conversion_action_ids given")
+    bad = [i for i in ids if not i.isdigit()]
+    if bad:
+        return _fail(tool, cid, payload, f"conversion_action_ids must be numeric: {bad}")
+    c = _get_client()
+    svc = c.get_service("CustomConversionGoalService")
+    op = c.get_type("MutateOperation")
+    goal = op.custom_conversion_goal_operation.create
+    goal.name = name.strip()
+    goal.status = c.enums.CustomConversionGoalStatusEnum.ENABLED
+    goal.conversion_actions.extend(svc.conversion_action_path(cid, i) for i in dict.fromkeys(ids))
+    return _run_mutate(tool, cid, [op], confirm, payload)
+
+
+@mcp.tool()
+def set_conversion_action_primary(
+    customer_id: str,
+    conversion_action_id: str,
+    primary: bool,
+    confirm: bool = False,
+) -> Dict[str, Any]:
+    """Mark a conversion action primary (biddable under account-default and
+    category-based campaign goals) or secondary (observation only; primary=false).
+    Custom conversion goals ignore this flag, so an action can be secondary account-wide
+    and still be bid on by the campaigns whose custom goal lists it. Dry run unless
+    confirm=true."""
+    cid = _cid(customer_id)
+    tool = "set_conversion_action_primary"
+    action_id = str(conversion_action_id).strip()
+    payload = dict(conversion_action_id=action_id, primary=bool(primary))
+    if not action_id.isdigit():
+        return _fail(tool, cid, payload, "conversion_action_id must be numeric")
+    c = _get_client()
+    op = c.get_type("MutateOperation")
+    ca = op.conversion_action_operation.update
+    ca.resource_name = c.get_service("ConversionActionService").conversion_action_path(cid, action_id)
+    ca.primary_for_goal = bool(primary)
+    # Explicit mask: a generated mask drops primary_for_goal=False (proto3 default).
+    op.conversion_action_operation.update_mask.paths.append("primary_for_goal")
+    return _run_mutate(tool, cid, [op], confirm, payload)
+
+
 def _ads_errors(exc: GoogleAdsException) -> List[Dict[str, str]]:
     return [
         {

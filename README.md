@@ -41,6 +41,9 @@ Works with Claude Code (and any MCP client over stdio).
 | `add_sitelinks` / `add_callouts` / `add_structured_snippet` | Create the assets and attach them to a campaign; `add_sitelinks` can attach to one ad group instead (`ad_group_id`) |
 | `upload_image_asset` | Put one image into the asset library (no link): `image_url` (https, public hosts, redirects refused, 5 MB) or `image_base64` for small files; returns the asset resource name to link with `add_image_assets` |
 | `set_campaign_conversion_goals` | Campaign-specific conversion goals: toggle `biddable` per (category, origin) pair — e.g. bid only on PURCHASE/WEBSITE by setting it true and every other account goal false; one atomic request |
+| `set_campaign_custom_conversion_goal` | Point a campaign at one custom conversion goal by id (action-level goals: the campaign bids on exactly the listed actions, primary/secondary flags ignored), or `""` to return to account-default goals |
+| `create_custom_conversion_goal` | Create an ENABLED custom conversion goal from a list of conversion action ids |
+| `set_conversion_action_primary` | Flip a conversion action between primary (biddable under account-default / category goals) and secondary (observation only); custom goals are unaffected |
 | `add_image_assets` | Upload PNG/JPEG files and attach them to a Search campaign (`AD_IMAGE`) — or to one ad group via `ad_group_id` (up to 20 images per campaign and per ad group); validates 1:1 / 1.91:1 shape, minimum size and 5 MB cap |
 | `add_business_assets` | Attach a business name (TEXT asset, `BUSINESS_NAME`) and/or business logo (`BUSINESS_LOGO`, square >=128x128, uploaded or re-linked by asset resource name) to a Search campaign |
 | `set_status` | ENABLED / PAUSED on a campaign, ad group, ad or keyword |
@@ -161,6 +164,14 @@ to the JSON to apply.
   an *empty* `MaximizeConversions` message to the `campaign_bidding_strategy`
   oneof and naming `maximize_conversions` in the update mask explicitly; a
   generated mask sees no set fields and sends nothing.
+
+- Custom conversion goals live on `conversionGoalCampaignConfigs/<campaign>`:
+  `goal_config_level = CAMPAIGN` plus the goal resource name, or `CUSTOMER` to
+  fall back to account defaults. Toggling a category goal
+  (`campaignConversionGoals/<campaign>~<category>~<origin>`) also flips the
+  campaign to campaign-specific goals, but categories are shared across
+  products (e.g. `SUBMIT_LEAD_FORM`), so per-product isolation needs a custom
+  goal. `primary_for_goal = false` must be named in the update mask explicitly.
 
 ## License
 
