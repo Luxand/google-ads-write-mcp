@@ -1628,6 +1628,179 @@ def set_location_bid_modifiers(
     return _run_mutate(tool, cid, ops, confirm, payload)
 
 
+# --------------------------------------------------------------------------- campaign targeting settings
+_POSITIVE_GEO = ("PRESENCE", "PRESENCE_OR_INTEREST")
+_NEGATIVE_GEO = ("PRESENCE", "PRESENCE_OR_INTEREST")
+
+
+@mcp.tool()
+def set_campaign_targeting_settings(
+    customer_id: str,
+    campaign_id: str,
+    positive_geo_target_type: Optional[str] = None,
+    negative_geo_target_type: Optional[str] = None,
+    search_partners: Optional[bool] = None,
+    display_network: Optional[bool] = None,
+    confirm: bool = False,
+) -> Dict[str, Any]:
+    """Change an EXISTING campaign's location option and networks (create_search_campaign sets these
+    only at creation). Leave an argument None to keep it.
+      positive_geo_target_type: PRESENCE ("people in or regularly in your targeted locations") or
+        PRESENCE_OR_INTEREST ("presence or interest", Google's default, which also serves people
+        elsewhere who show interest in the targeted locations).
+      negative_geo_target_type: PRESENCE or PRESENCE_OR_INTEREST, how location exclusions apply.
+      search_partners: Google Search Partners network (network_settings.target_search_network).
+      display_network: Display expansion for a Search campaign (network_settings.target_content_network).
+    Google Search itself is never switched off. The update mask names each field explicitly so that
+    false is sent. Dry run unless confirm=true."""
+    cid = _cid(customer_id)
+    payload = dict(campaign_id=campaign_id, positive_geo_target_type=positive_geo_target_type,
+                   negative_geo_target_type=negative_geo_target_type, search_partners=search_partners,
+                   display_network=display_network)
+    tool = "set_campaign_targeting_settings"
+    if all(v is None for v in (positive_geo_target_type, negative_geo_target_type, search_partners, display_network)):
+        return _fail(tool, cid, payload, "nothing to change")
+    if positive_geo_target_type is not None and positive_geo_target_type not in _POSITIVE_GEO:
+        return _fail(tool, cid, payload, f"positive_geo_target_type must be one of {_POSITIVE_GEO}")
+    if negative_geo_target_type is not None and negative_geo_target_type not in _NEGATIVE_GEO:
+        return _fail(tool, cid, payload, f"negative_geo_target_type must be one of {_NEGATIVE_GEO}")
+    c = _get_client()
+    ga = c.get_service("GoogleAdsService")
+    q = ("SELECT campaign.id, campaign.advertising_channel_type, "
+         "campaign.geo_target_type_setting.positive_geo_target_type, "
+         "campaign.geo_target_type_setting.negative_geo_target_type, "
+         "campaign.network_settings.target_search_network, campaign.network_settings.target_content_network "
+         f"FROM campaign WHERE campaign.id = {int(campaign_id)}")
+    rows = list(ga.search(customer_id=cid, query=q))
+    if not rows:
+        return _fail(tool, cid, payload, "campaign not found")
+    cur = rows[0].campaign
+    payload["previous"] = {
+        "positive_geo_target_type": cur.geo_target_type_setting.positive_geo_target_type.name,
+        "negative_geo_target_type": cur.geo_target_type_setting.negative_geo_target_type.name,
+        "search_partners": cur.network_settings.target_search_network,
+        "display_network": cur.network_settings.target_content_network,
+    }
+    op = c.get_type("MutateOperation")
+    camp = op.campaign_operation.update
+    camp.resource_name = c.get_service("CampaignService").campaign_path(cid, str(campaign_id))
+    paths = op.campaign_operation.update_mask.paths
+    if positive_geo_target_type is not None:
+        camp.geo_target_type_setting.positive_geo_target_type = getattr(
+            c.enums.PositiveGeoTargetTypeEnum, positive_geo_target_type)
+        paths.append("geo_target_type_setting.positive_geo_target_type")
+    if negative_geo_target_type is not None:
+        camp.geo_target_type_setting.negative_geo_target_type = getattr(
+            c.enums.NegativeGeoTargetTypeEnum, negative_geo_target_type)
+        paths.append("geo_target_type_setting.negative_geo_target_type")
+    if search_partners is not None:
+        camp.network_settings.target_search_network = bool(search_partners)
+        paths.append("network_settings.target_search_network")
+    if display_network is not None:
+        camp.network_settings.target_content_network = bool(display_network)
+        paths.append("network_settings.target_content_network")
+    out = _run_mutate(tool, cid, [op], confirm, payload)
+    out["previous"] = payload["previous"]
+    return out
+
+
+def _geo_id(raw: Union[str, int]) -> str:
+    gid = str(raw).strip().rsplit("/", 1)[-1]
+    if not gid.isdigit():
+        raise ValueError(f"{raw!r}: use a geo target constant id such as 2840 or geoTargetConstants/2840")
+    return gid
+
+
+@mcp.tool()
+def set_campaign_locations(
+    customer_id: str,
+    campaign_id: str,
+    add_geo_ids: Optional[List[Union[str, int]]] = None,
+    remove_geo_ids: Optional[List[Union[str, int]]] = None,
+    exclude_geo_ids: Optional[List[Union[str, int]]] = None,
+    unexclude_geo_ids: Optional[List[Union[str, int]]] = None,
+    confirm: bool = False,
+) -> Dict[str, Any]:
+    """Edit an EXISTING campaign's location targeting in one atomic mutate. Ids are geo target constant
+    ids (2840 = US, 2604 = Peru; "geoTargetConstants/2604" also accepted).
+      add_geo_ids:       start targeting (new positive location criterion).
+      remove_geo_ids:    stop targeting (removes the positive criterion and any bid adjustment on it;
+                         re-add later with add_geo_ids). Must currently be targeted.
+      exclude_geo_ids:   add a location exclusion (negative criterion). A geo that is targeted must also
+                         be listed in remove_geo_ids, because Google refuses to target and exclude it at once.
+      unexclude_geo_ids: drop an existing exclusion.
+    Geos already in the requested state are skipped and reported. Location criteria are targeting
+    settings, not entities with history, so removing one is not gated by the managed label.
+    Dry run unless confirm=true."""
+    cid = _cid(customer_id)
+    payload = dict(campaign_id=campaign_id, add_geo_ids=add_geo_ids, remove_geo_ids=remove_geo_ids,
+                   exclude_geo_ids=exclude_geo_ids, unexclude_geo_ids=unexclude_geo_ids)
+    tool = "set_campaign_locations"
+    try:
+        add = [_geo_id(x) for x in (add_geo_ids or [])]
+        rem = [_geo_id(x) for x in (remove_geo_ids or [])]
+        exc = [_geo_id(x) for x in (exclude_geo_ids or [])]
+        unexc = [_geo_id(x) for x in (unexclude_geo_ids or [])]
+    except ValueError as e:
+        return _fail(tool, cid, payload, str(e))
+    if not (add or rem or exc or unexc):
+        return _fail(tool, cid, payload, "nothing to change")
+    clash = (set(add) & (set(rem) | set(exc))) | (set(exc) & set(unexc))
+    if clash:
+        return _fail(tool, cid, payload, f"conflicting instructions for {sorted(clash)}")
+    c = _get_client()
+    ga = c.get_service("GoogleAdsService")
+    q = ("SELECT campaign.id, campaign_criterion.resource_name, campaign_criterion.negative, "
+         "campaign_criterion.location.geo_target_constant FROM campaign_criterion "
+         f"WHERE campaign.id = {int(campaign_id)} AND campaign_criterion.type = LOCATION")
+    targeted: Dict[str, str] = {}
+    excluded: Dict[str, str] = {}
+    try:
+        for row in ga.search(customer_id=cid, query=q):
+            gid = str(row.campaign_criterion.location.geo_target_constant).rsplit("/", 1)[-1]
+            (excluded if row.campaign_criterion.negative else targeted)[gid] = row.campaign_criterion.resource_name
+    except GoogleAdsException as e:
+        return _fail(tool, cid, payload, f"could not read campaign locations: {e.failure.errors[0].message if e.failure.errors else e}")
+    not_targeted = [g for g in rem if g not in targeted]
+    if not_targeted:
+        return _fail(tool, cid, payload, f"remove_geo_ids not currently targeted: {not_targeted}")
+    still_targeted = [g for g in exc if g in targeted and g not in rem]
+    if still_targeted:
+        return _fail(tool, cid, payload,
+                     f"exclude_geo_ids {still_targeted} are targeted; also list them in remove_geo_ids")
+    campaign_rn = c.get_service("CampaignService").campaign_path(cid, str(campaign_id))
+    ops, skipped = [], []
+    for g in rem:
+        op = c.get_type("MutateOperation")
+        op.campaign_criterion_operation.remove = targeted[g]
+        ops.append(op)
+    for g in unexc:
+        if g not in excluded:
+            skipped.append(f"unexclude {g}: not excluded")
+            continue
+        op = c.get_type("MutateOperation")
+        op.campaign_criterion_operation.remove = excluded[g]
+        ops.append(op)
+    for g, negative in [(g, False) for g in add] + [(g, True) for g in exc]:
+        if (targeted if not negative else excluded).get(g):
+            skipped.append(f"{'exclude' if negative else 'add'} {g}: already {'excluded' if negative else 'targeted'}")
+            continue
+        if not negative and g in excluded and g not in unexc:
+            return _fail(tool, cid, payload, f"add_geo_ids {g} is excluded; also list it in unexclude_geo_ids")
+        op = c.get_type("MutateOperation")
+        crit = op.campaign_criterion_operation.create
+        crit.campaign = campaign_rn
+        crit.location.geo_target_constant = f"geoTargetConstants/{g}"
+        crit.negative = negative
+        ops.append(op)
+    if not ops:
+        return _fail(tool, cid, payload, "nothing to change: " + "; ".join(skipped))
+    out = _run_mutate(tool, cid, ops, confirm, payload)
+    if skipped:
+        out["skipped"] = skipped
+    return out
+
+
 def _audience_ops(c: GoogleAdsClient, cid: str, campaign_id: str, user_interest_ids: List[Union[str, int]],
                   bid_modifier_pct: Optional[float]):
     """Observation-mode audiences on a Search campaign: (1) the campaign's targeting setting gets
